@@ -1,5 +1,7 @@
 # foreman-stack
 
+[![CI](https://github.com/13W/foreman/actions/workflows/ci.yml/badge.svg)](https://github.com/13W/foreman/actions/workflows/ci.yml)
+
 pnpm monorepo for the Foreman agent system.
 
 ## Packages
