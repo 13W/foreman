@@ -22,7 +22,7 @@ export const Subtask = z
     id: z.string(),
     assigned_agent: z.string(),
     description: z.string(),
-    inputs: SubtaskInputs.default({}),
+    inputs: SubtaskInputs.default({ relevant_files: [], constraints: [], context_from_prior_tasks: [] }),
     expected_output: z.string().nullable().default(null),
   })
   .strict();
