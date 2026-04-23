@@ -1,0 +1,54 @@
+# foreman-proxy reference configuration
+# Copy this file, adjust to your needs, and run:
+#   foreman-proxy --config ./proxy.yaml
+
+proxy:
+  name: "my-agent"
+  version: "0.1.0"
+  bind: "127.0.0.1:7001"       # loopback only; no remote bind in MVP
+
+wrapped_agent:
+  command: "claude"             # ACP-compatible agent binary
+  args: ["--acp"]
+  env: {}                       # extra env vars passed to the subprocess
+  cwd_strategy: "worktree"      # MVP: only "worktree" supported
+  startup_timeout_sec: 30
+
+role:
+  description: |
+    TypeScript refactoring specialist. Focused on type-system
+    improvements, API ergonomics, and module restructuring.
+
+  skills:
+    - id: "typescript-refactoring"
+      name: "TypeScript Refactoring"
+      description: "Refactor TypeScript code for better type safety and ergonomics."
+      tags: ["typescript", "types", "refactoring"]
+      examples:
+        - "Extract interface from inline type"
+        - "Convert namespace imports to named imports"
+
+mcps:
+  # MCP servers always attached to every session. Example:
+  # personal:
+  #   - name: "ts-lsp"
+  #     command: "typescript-language-server"
+  #     args: ["--stdio"]
+  #     env: {}
+  personal: []
+
+worktrees:
+  base_dir: "/tmp/foreman-worktrees"
+  branch_prefix: "foreman/task-"
+  default_base_branch: "main"
+  cleanup_policy: "never"       # never | on_success | always | ttl
+
+runtime:
+  max_subprocesses: 1           # MVP default: one subprocess
+  max_sessions_per_subprocess: 1 # MVP default: one session per subprocess
+  task_hard_timeout_sec: 3600   # 1 hour hard cap per task
+
+logging:
+  level: "info"                 # trace | debug | info | warn | error | fatal
+  format: "json"                # json | pretty
+  destination: "stderr"
