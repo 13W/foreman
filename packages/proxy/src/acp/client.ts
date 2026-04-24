@@ -1,0 +1,285 @@
+import { spawn } from 'node:child_process';
+import { Readable, Writable } from 'node:stream';
+import { randomUUID } from 'node:crypto';
+import {
+  ClientSideConnection,
+  ndJsonStream,
+  PROTOCOL_VERSION,
+} from '@agentclientprotocol/sdk';
+import type {
+  Client,
+  McpServer,
+  PermissionOption,
+  RequestPermissionRequest,
+  RequestPermissionResponse,
+} from '@agentclientprotocol/sdk';
+import type {
+  ACPClientManager,
+  ACPPermissionRequest,
+  ContentBlock,
+  FsPermissionHandler,
+  PermissionHandler,
+  PromptResult,
+  SessionHandle,
+  StopReason,
+  SubprocessHandle,
+  TerminalPermissionHandler,
+  ToolCallUpdate,
+} from '@foreman-stack/shared';
+import type { McpServerSpec } from '@foreman-stack/shared';
+import { DefaultSubprocessHandle } from './subprocess-handle.js';
+import { DefaultSessionHandle } from './session-handle.js';
+
+export type { PermissionHandler, FsPermissionHandler, TerminalPermissionHandler };
+
+// ---------------------------------------------------------------------------
+// Internal async queue for streaming ToolCallUpdate values
+// ---------------------------------------------------------------------------
+class AsyncQueue<T> {
+  private readonly items: T[] = [];
+  private readonly waiters: Array<(result: IteratorResult<T>) => void> = [];
+  private closed = false;
+
+  push(item: T): void {
+    if (this.waiters.length > 0) {
+      this.waiters.shift()!({ value: item, done: false });
+    } else {
+      this.items.push(item);
+    }
+  }
+
+  close(): void {
+    this.closed = true;
+    while (this.waiters.length > 0) {
+      this.waiters.shift()!({ value: undefined as unknown as T, done: true });
+    }
+  }
+
+  [Symbol.asyncIterator](): AsyncIterableIterator<T> {
+    const self = this;
+    return {
+      next(): Promise<IteratorResult<T>> {
+        return new Promise((resolve) => {
+          if (self.items.length > 0) {
+            resolve({ value: self.items.shift()!, done: false });
+          } else if (self.closed) {
+            resolve({ value: undefined as unknown as T, done: true });
+          } else {
+            self.waiters.push(resolve);
+          }
+        });
+      },
+      [Symbol.asyncIterator]() {
+        return this;
+      },
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Internal per-session handler registry
+// ---------------------------------------------------------------------------
+type SessionHandlers = {
+  generic?: PermissionHandler;
+  fsRead?: FsPermissionHandler;
+  fsWrite?: FsPermissionHandler;
+  terminal?: TerminalPermissionHandler;
+};
+
+// ---------------------------------------------------------------------------
+// MCP conversion helpers
+// ---------------------------------------------------------------------------
+function specToSdkMcpServer(spec: McpServerSpec): McpServer {
+  if (spec.transport === 'stdio') {
+    return {
+      name: spec.name,
+      command: spec.command ?? '',
+      args: spec.args ?? [],
+      env: Object.entries(spec.env ?? {}).map(([name, value]) => ({ name, value })),
+    };
+  }
+  // sse
+  return {
+    type: 'sse' as const,
+    name: spec.name,
+    url: spec.url ?? '',
+    headers: [],
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Permission mapping helpers
+// ---------------------------------------------------------------------------
+function extractPath(rawInput: unknown): string {
+  if (rawInput && typeof rawInput === 'object' && 'path' in rawInput) {
+    return String((rawInput as Record<string, unknown>).path ?? '');
+  }
+  return '';
+}
+
+function extractCommand(rawInput: unknown): string {
+  if (rawInput && typeof rawInput === 'object' && 'command' in rawInput) {
+    return String((rawInput as Record<string, unknown>).command ?? '');
+  }
+  return '';
+}
+
+function toolKindToAcpType(kind: string | null | undefined): ACPPermissionRequest['type'] | null {
+  switch (kind) {
+    case 'read':
+      return 'fs.read';
+    case 'edit':
+    case 'delete':
+    case 'move':
+      return 'fs.write';
+    case 'execute':
+      return 'terminal.create';
+    default:
+      return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// DefaultACPClientManager
+// ---------------------------------------------------------------------------
+export class DefaultACPClientManager implements ACPClientManager {
+  private readonly sessionQueues = new Map<string, AsyncQueue<ToolCallUpdate>>();
+  private readonly sessionHandlers = new Map<string, SessionHandlers>();
+
+  async spawnSubprocess(
+    command: string,
+    args: string[],
+    env?: Record<string, string>,
+  ): Promise<SubprocessHandle> {
+    const id = randomUUID();
+    const proc = spawn(command, args, {
+      stdio: ['pipe', 'pipe', 'inherit'],
+      env: { ...process.env, ...env },
+    });
+
+    const stdinStream = Writable.toWeb(proc.stdin!) as WritableStream<Uint8Array>;
+    const stdoutStream = Readable.toWeb(proc.stdout!) as ReadableStream<Uint8Array>;
+    const stream = ndJsonStream(stdinStream, stdoutStream);
+
+    const self = this;
+    const connection = new ClientSideConnection(
+      (_agent): Client => ({
+        async sessionUpdate(params) {
+          if (params.update.sessionUpdate === 'tool_call_update') {
+            const queue = self.sessionQueues.get(params.sessionId);
+            queue?.push(params.update as unknown as ToolCallUpdate);
+          }
+        },
+        async requestPermission(params) {
+          return self.dispatchPermission(params);
+        },
+      }),
+      stream,
+    );
+
+    await connection.initialize({
+      protocolVersion: PROTOCOL_VERSION,
+      clientInfo: { name: 'foreman-proxy', version: '0.0.1' },
+    });
+
+    return new DefaultSubprocessHandle(id, proc, connection);
+  }
+
+  async createSession(
+    subprocess: SubprocessHandle,
+    cwd: string,
+    mcpServers: McpServerSpec[],
+  ): Promise<SessionHandle> {
+    const handle = subprocess as DefaultSubprocessHandle;
+    const resp = await handle.connection.newSession({
+      cwd,
+      mcpServers: mcpServers.map(specToSdkMcpServer),
+    });
+    return new DefaultSessionHandle(resp.sessionId, handle);
+  }
+
+  sendPrompt(session: SessionHandle, content: ContentBlock[]): PromptResult {
+    const sessionId = session.getId();
+    const queue = new AsyncQueue<ToolCallUpdate>();
+    this.sessionQueues.set(sessionId, queue);
+
+    const handle = session as DefaultSessionHandle;
+    const promptPromise = handle.subprocessHandle.connection.prompt({
+      sessionId,
+      prompt: content,
+    });
+
+    promptPromise.finally(() => {
+      queue.close();
+      this.sessionQueues.delete(sessionId);
+    });
+
+    return {
+      updates: queue[Symbol.asyncIterator](),
+      stopReason: promptPromise.then((r) => r.stopReason as StopReason),
+    };
+  }
+
+  async cancelSession(session: SessionHandle): Promise<void> {
+    const handle = session as DefaultSessionHandle;
+    await handle.subprocessHandle.connection.cancel({ sessionId: session.getId() });
+  }
+
+  onPermissionRequest(session: SessionHandle, handler: PermissionHandler): void {
+    this.getHandlers(session.getId()).generic = handler;
+  }
+
+  onFsRead(session: SessionHandle, handler: FsPermissionHandler): void {
+    this.getHandlers(session.getId()).fsRead = handler;
+  }
+
+  onFsWrite(session: SessionHandle, handler: FsPermissionHandler): void {
+    this.getHandlers(session.getId()).fsWrite = handler;
+  }
+
+  onTerminalCreate(session: SessionHandle, handler: TerminalPermissionHandler): void {
+    this.getHandlers(session.getId()).terminal = handler;
+  }
+
+  private getHandlers(sessionId: string): SessionHandlers {
+    let h = this.sessionHandlers.get(sessionId);
+    if (!h) {
+      h = {};
+      this.sessionHandlers.set(sessionId, h);
+    }
+    return h;
+  }
+
+  private async dispatchPermission(
+    params: RequestPermissionRequest,
+  ): Promise<RequestPermissionResponse> {
+    const { sessionId, toolCall } = params;
+    const handlers = this.sessionHandlers.get(sessionId);
+    if (!handlers) return { outcome: { outcome: 'cancelled' } };
+
+    const acpType = toolKindToAcpType(toolCall.kind);
+    let option: PermissionOption | undefined;
+
+    if (acpType === 'fs.read' && handlers.fsRead) {
+      option = await handlers.fsRead(extractPath(toolCall.rawInput));
+    } else if (acpType === 'fs.write' && handlers.fsWrite) {
+      option = await handlers.fsWrite(extractPath(toolCall.rawInput));
+    } else if (acpType === 'terminal.create' && handlers.terminal) {
+      option = await handlers.terminal(extractCommand(toolCall.rawInput));
+    } else if (handlers.generic) {
+      const acpReq: ACPPermissionRequest = {
+        type: acpType ?? 'fs.read',
+        path:
+          acpType === 'fs.read' || acpType === 'fs.write'
+            ? extractPath(toolCall.rawInput)
+            : undefined,
+        command:
+          acpType === 'terminal.create' ? extractCommand(toolCall.rawInput) : undefined,
+      };
+      option = await handlers.generic(acpReq);
+    }
+
+    if (!option) return { outcome: { outcome: 'cancelled' } };
+    return { outcome: { outcome: 'selected', optionId: option.optionId } };
+  }
+}
