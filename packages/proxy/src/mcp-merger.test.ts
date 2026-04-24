@@ -1,8 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { mergeMcps, validatePersonalMcps, McpNameCollisionError } from './mcp-merger.js';
-import type { McpServer } from './config.js';
 
-function mcp(name: string): McpServer {
+function mcp(name: string) {
   return { name, command: `${name}-cmd`, args: [], env: {} };
 }
 
@@ -73,7 +72,7 @@ describe('mergeMcps', () => {
   });
 
   it('preserves MCP server command/args/env details', () => {
-    const server: McpServer = {
+    const server = {
       name: 'ts-lsp',
       command: 'typescript-language-server',
       args: ['--stdio'],

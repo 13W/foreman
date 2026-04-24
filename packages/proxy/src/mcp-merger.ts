@@ -1,18 +1,14 @@
-import type { McpServer } from './config.js';
-
 export class McpNameCollisionError extends Error {
   constructor(
     public readonly mcpName: string,
     public readonly sources: 'personal' | 'injected' | 'both',
   ) {
-    super(
-      `MCP name '${mcpName}' collision in ${sources} sources. Rename or remove one.`,
-    );
+    super(`MCP name '${mcpName}' collision in ${sources} sources. Rename or remove one.`);
     this.name = 'McpNameCollisionError';
   }
 }
 
-export function validatePersonalMcps(mcps: McpServer[]): void {
+export function validatePersonalMcps(mcps: Array<{ name: string }>): void {
   const seen = new Set<string>();
   for (const mcp of mcps) {
     if (seen.has(mcp.name)) {
@@ -22,7 +18,7 @@ export function validatePersonalMcps(mcps: McpServer[]): void {
   }
 }
 
-export function mergeMcps(personal: McpServer[], injected: McpServer[]): McpServer[] {
+export function mergeMcps<T extends { name: string }>(personal: T[], injected: T[]): T[] {
   const injectedSeen = new Set<string>();
   for (const mcp of injected) {
     if (injectedSeen.has(mcp.name)) {
