@@ -1,7 +1,7 @@
 import { realpathSync } from 'node:fs';
 import { basename, relative, resolve } from 'node:path';
 
-export type PermissionDecision = 'approve' | 'escalate';
+export type PolicyDecision = 'approve' | 'escalate';
 
 function resolveReal(p: string): string {
   try {
@@ -18,14 +18,14 @@ function isWithinDirectory(filePath: string, dirPath: string): boolean {
   return rel === '' || (!rel.startsWith('..') && !relative(realDir, realFile).startsWith('/'));
 }
 
-export function evaluateFsPermission(path: string, worktreeRoot: string): PermissionDecision {
+export function evaluateFsPermission(path: string, worktreeRoot: string): PolicyDecision {
   return isWithinDirectory(path, worktreeRoot) ? 'approve' : 'escalate';
 }
 
 export function evaluateTerminalPermission(
   command: string,
   whitelist: string[],
-): PermissionDecision {
+): PolicyDecision {
   const firstToken = command.trim().split(/\s+/)[0] ?? '';
   const commandBasename = basename(firstToken);
   return whitelist.includes(commandBasename) ? 'approve' : 'escalate';
