@@ -1,12 +1,12 @@
-import type { AgentCardMetadata, InputDecision, StreamEvent } from './types.js';
+import type { AgentCardMetadata, PermissionDecision, StreamEvent } from './types.js';
 import type { TaskPayload } from '../task.js';
 
 /**
  * Implemented in packages/foreman/src/a2a/client.ts using @a2a-js/sdk client-side APIs.
  *
- * respondToInput() hides A2A v0.3 SDK specifics: the protocol implements input responses
+ * respondToPermission() hides A2A v0.3 SDK specifics: the protocol implements permission responses
  * as a sendMessage call using the same contextId as the original task. Implementations
- * must map InputDecision to the correct SDK sendMessage payload.
+ * must map PermissionDecision to the correct SDK sendMessage payload.
  */
 export interface A2AClient {
   /** Fetch and validate the agent card from /.well-known/agent.json */
@@ -34,8 +34,8 @@ export interface A2AClient {
   cancelTask(taskId: string): Promise<void>;
 
   /**
-   * Respond to a pending input-required escalation.
+   * Respond to a pending permission-required escalation.
    * Implemented via SDK sendMessage with the task's contextId (A2A v0.3 convention).
    */
-  respondToInput(taskId: string, decision: InputDecision): Promise<void>;
+  respondToPermission(taskId: string, decision: PermissionDecision): Promise<void>;
 }

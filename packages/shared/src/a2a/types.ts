@@ -1,6 +1,10 @@
 import type { TaskPayload, TaskResult } from '../task.js';
+import type { PermissionDecision, PermissionRequestType } from '../permissions.js';
+import type { AgentSkill } from '@a2a-js/sdk';
 
 export type { TaskPayload, TaskResult };
+export type { PermissionDecision, PermissionRequestType };
+export type { AgentSkill };
 
 export interface TaskHandle {
   taskId: string;
@@ -18,18 +22,10 @@ export interface StreamEvent {
 }
 
 export interface PermissionRequest {
-  taskId: string;
-  requestId: string;
-  message: string;
-  /** Suggested choices presented to the human operator */
-  options?: string[];
-}
-
-export interface InputDecision {
-  requestId: string;
-  approved: boolean;
-  /** Free-form response or selected option */
-  response?: string;
+  type: PermissionRequestType;
+  path?: string;    // present for fs.read / fs.write
+  command?: string; // present for terminal.create
+  message: string;  // human-readable summary for the operator
 }
 
 export interface AgentCardMetadata {
@@ -37,5 +33,5 @@ export interface AgentCardMetadata {
   url: string;
   version: string;
   description?: string;
-  capabilities?: string[];
+  skills?: AgentSkill[];
 }
