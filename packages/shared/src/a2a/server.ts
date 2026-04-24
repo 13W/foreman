@@ -1,17 +1,11 @@
-import type { AgentCardMetadata, PermissionRequest, StreamEvent, TaskHandle } from './types.js';
+// packages/shared/src/a2a/server.ts
+import type { AgentCardMetadata, PermissionDecision, PermissionRequest, StreamEvent } from './types.js';
 import type { TaskPayload, TaskResult } from '../task.js';
 
-export type TaskHandler = (payload: TaskPayload, handle: TaskHandle) => Promise<void>;
+export type TaskHandler = (payload: TaskPayload, handle: import('./types.js').TaskHandle) => Promise<void>;
 
-/**
- * Implemented in packages/proxy/src/a2a/server.ts using @a2a-js/sdk server-side APIs.
- *
- * Streaming is delivered via sendUpdate(); the SDK's AgentExecutor context is hidden
- * behind completeTask() and requestInput(). Implementation must map these calls to the
- * appropriate SDK TaskContext methods.
- */
 export interface A2AServer {
-  /** Register the agent card advertised at /.well-known/agent.json */
+  /** Register the agent card advertised at /.well-known/agent-card.json */
   register(agentCard: AgentCardMetadata): void;
 
   /** Subscribe to incoming tasks dispatched by A2A clients */
@@ -24,11 +18,27 @@ export interface A2AServer {
   completeTask(taskId: string, result: TaskResult): void | Promise<void>;
 
   /**
-   * Escalate taskId to require human input before proceeding.
-   * Implementation sends an input-required status event via the SDK.
+   * Register a cancel function for taskId.
+   * Called immediately after session acquisition, before runPrompt.
+   * The SDK's cancelTask will invoke this to cascade cancellation into ACP.
    */
-  requestInput(taskId: string, request: PermissionRequest): Promise<void>;
+  setCancelFn(taskId: string, fn: () => void): void;
+
+  /**
+   * Escalate taskId to require human input before proceeding.
+   * Sends an input-required status event via the SDK bus, then blocks until
+   * the operator responds (via a second execute() call from the A2A client).
+   * opts.timeoutMs is required — caller reads from config.
+   */
+  requestInput(
+    taskId: string,
+    request: PermissionRequest,
+    opts: { timeoutMs: number },
+  ): Promise<PermissionDecision>;
 
   /** Start the HTTP server and begin accepting A2A connections */
   listen(bindAddr: string): Promise<void>;
+
+  /** Stop the HTTP server */
+  close(): Promise<void>;
 }
