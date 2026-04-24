@@ -39,14 +39,9 @@ export type TaskPayload = z.infer<typeof TaskPayload>;
 export const TaskResult = z
   .object({
     status: z.enum(['completed', 'failed', 'cancelled']),
-    stop_reason: z.enum([
-      'end_turn',
-      'max_tokens',
-      'refusal',
-      'cancelled',
-      'timeout',
-      'subprocess_crash',
-    ]),
+    stop_reason: z
+      .enum(['end_turn', 'max_tokens', 'refusal', 'cancelled', 'timeout', 'subprocess_crash'])
+      .nullable(), // null when agent did not start (pre-flight error)
     summary: z.string(),
     branch_ref: z.string(),
     session_transcript_ref: z.string(),

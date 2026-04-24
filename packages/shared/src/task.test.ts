@@ -170,4 +170,16 @@ describe('TaskResult', () => {
     const result = TaskResult.safeParse(withoutSummary);
     expect(result.success).toBe(false);
   });
+
+  it('accepts null stop_reason for pre-flight failures', () => {
+    const result = TaskResult.safeParse({
+      status: 'failed',
+      stop_reason: null,
+      summary: '',
+      branch_ref: '',
+      session_transcript_ref: '',
+      error: { code: 'base_branch_not_found', message: 'Branch not found' },
+    });
+    expect(result.success).toBe(true);
+  });
 });
