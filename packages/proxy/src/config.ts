@@ -61,6 +61,13 @@ const ProxyConfigSchema = z.object({
     })
     .default({ personal: [] }),
 
+  permissions: z
+    .object({
+      terminal_whitelist: z.array(z.string()).default([]),
+      permission_timeout_sec: z.number().int().positive().default(300),
+    })
+    .default({ terminal_whitelist: [], permission_timeout_sec: 300 }),
+
   worktrees: z.object({
     base_dir: z.string(),
     branch_prefix: z.string().default('foreman/task-'),
