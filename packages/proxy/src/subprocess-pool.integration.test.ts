@@ -21,6 +21,10 @@ function makeConfig(maxSubs = 1, maxSess = 1): ProxyConfig {
     },
     role: { description: 'test', skills: [] },
     mcps: { personal: [] },
+    permissions: {
+      terminal_whitelist: [],
+      permission_timeout_sec: 300,
+    },
     worktrees: {
       base_dir: '/tmp/test-worktrees',
       branch_prefix: 'foreman/task-',
@@ -50,14 +54,21 @@ describe('SubprocessPool — integration with echo-agent fixture', () => {
 
     const slot = await pool.acquireSession(process.cwd(), []);
 
-    const result = client.sendPrompt(slot.session, [{ type: 'text', text: 'Hello' }]);
-    const updates: unknown[] = [];
-    for await (const u of result.updates) {
-      updates.push(u);
+    const stream = client.sendPrompt(slot.session, [{ type: 'text', text: 'Hello' }]);
+    const toolCallUpdates: unknown[] = [];
+    let stopReason: string | undefined;
+
+    for await (const event of stream) {
+      if (event.kind === 'tool_call_update') {
+        toolCallUpdates.push(event.update);
+      } else if (event.kind === 'stop') {
+        stopReason = event.reason;
+        break;
+      }
     }
 
-    expect(await result.stopReason).toBe('end_turn');
-    expect(updates).toHaveLength(1);
+    expect(stopReason).toBe('end_turn');
+    expect(toolCallUpdates).toHaveLength(1);
 
     await slot.release();
   }, 20_000);

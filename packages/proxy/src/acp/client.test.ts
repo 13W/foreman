@@ -1,6 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { Client, Agent } from '@agentclientprotocol/sdk';
-import type { PermissionOption } from '@agentclientprotocol/sdk';
 
 // ---------------------------------------------------------------------------
 // Hoisted mock state — must be created before vi.mock() factories run
@@ -40,6 +39,7 @@ vi.mock('node:child_process', () => ({
     kill: vi.fn(),
     pid: 12345,
   }),
+  execFile: vi.fn(),
 }));
 
 vi.mock('node:stream', () => ({
@@ -51,6 +51,7 @@ vi.mock('node:stream', () => ({
 // Import SUT after mocks are declared
 // ---------------------------------------------------------------------------
 import { DefaultACPClientManager } from './client.js';
+import type { PromptEvent } from '@foreman-stack/shared';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -60,8 +61,12 @@ function getClient(): Client {
   return mocks.state.capturedToClient({} as Agent);
 }
 
-function makePermissionOption(optionId = 'opt-1'): PermissionOption {
-  return { kind: 'allow_once', optionId, name: 'Allow once' };
+async function collectEvents(stream: AsyncIterableIterator<PromptEvent>): Promise<PromptEvent[]> {
+  const events: PromptEvent[] = [];
+  for await (const event of stream) {
+    events.push(event);
+  }
+  return events;
 }
 
 // ---------------------------------------------------------------------------
@@ -176,16 +181,19 @@ describe('DefaultACPClientManager', () => {
       );
     });
 
-    it('stopReason resolves with the value from the prompt response', async () => {
+    it('emits a stop event with the stop reason from the prompt response', async () => {
       const subprocess = await manager.spawnSubprocess('agent', []);
       const session = await manager.createSession(subprocess, '/tmp', []);
 
-      const result = manager.sendPrompt(session, []);
+      const stream = manager.sendPrompt(session, []);
+      const events = await collectEvents(stream);
 
-      await expect(result.stopReason).resolves.toBe('end_turn');
+      const stopEvent = events.find((e) => e.kind === 'stop');
+      expect(stopEvent).toBeDefined();
+      expect((stopEvent as Extract<PromptEvent, { kind: 'stop' }>).reason).toBe('end_turn');
     });
 
-    it('streams tool_call_update notifications via updates iterator', async () => {
+    it('streams tool_call_update notifications as tool_call_update events', async () => {
       let promptResolve!: (value: unknown) => void;
       mocks.connection.prompt.mockReturnValueOnce(
         new Promise((resolve) => {
@@ -195,7 +203,7 @@ describe('DefaultACPClientManager', () => {
 
       const subprocess = await manager.spawnSubprocess('agent', []);
       const session = await manager.createSession(subprocess, '/tmp', []);
-      const result = manager.sendPrompt(session, []);
+      const stream = manager.sendPrompt(session, []);
 
       const client = getClient();
 
@@ -210,22 +218,18 @@ describe('DefaultACPClientManager', () => {
       });
 
       // Collect in parallel, then close
-      const collectPromise = (async () => {
-        const items: unknown[] = [];
-        for await (const item of result.updates) {
-          items.push(item);
-        }
-        return items;
-      })();
+      const collectPromise = collectEvents(stream);
 
       promptResolve({ stopReason: 'end_turn' });
 
-      const updates = await collectPromise;
-      expect(updates).toHaveLength(1);
-      expect((updates[0] as { toolCallId: string }).toolCallId).toBe('call-1');
+      const events = await collectPromise;
+      const updateEvents = events.filter((e) => e.kind === 'tool_call_update');
+      expect(updateEvents).toHaveLength(1);
+      const updateEvent = updateEvents[0] as Extract<PromptEvent, { kind: 'tool_call_update' }>;
+      expect((updateEvent.update as { toolCallId: string }).toolCallId).toBe('call-1');
     });
 
-    it('ignores non-tool_call_update session notifications', async () => {
+    it('emits agent_message_chunk events for agent_message_chunk session updates', async () => {
       let promptResolve!: (value: unknown) => void;
       mocks.connection.prompt.mockReturnValueOnce(
         new Promise((resolve) => {
@@ -235,7 +239,7 @@ describe('DefaultACPClientManager', () => {
 
       const subprocess = await manager.spawnSubprocess('agent', []);
       const session = await manager.createSession(subprocess, '/tmp', []);
-      const result = manager.sendPrompt(session, []);
+      const stream = manager.sendPrompt(session, []);
 
       const client = getClient();
 
@@ -247,18 +251,49 @@ describe('DefaultACPClientManager', () => {
         },
       });
 
-      const collectPromise = (async () => {
-        const items: unknown[] = [];
-        for await (const item of result.updates) {
-          items.push(item);
+      const collectPromise = collectEvents(stream);
+      promptResolve({ stopReason: 'end_turn' });
+
+      const events = await collectPromise;
+      const chunkEvents = events.filter((e) => e.kind === 'agent_message_chunk');
+      expect(chunkEvents).toHaveLength(1);
+    });
+
+    it('permission_request events are emitted in the stream and respond() resolves the decision', async () => {
+      let promptResolve!: (value: unknown) => void;
+      mocks.connection.prompt.mockReturnValueOnce(
+        new Promise((resolve) => {
+          promptResolve = resolve;
+        }),
+      );
+
+      const subprocess = await manager.spawnSubprocess('agent', []);
+      const session = await manager.createSession(subprocess, '/tmp', []);
+      const stream = manager.sendPrompt(session, []);
+
+      const client = getClient();
+
+      // Fire permission request from agent side
+      const permissionPromise = client.requestPermission({
+        sessionId: 'test-session-id',
+        options: [{ kind: 'allow_once', optionId: 'opt-1', name: 'Allow once' }],
+        toolCall: { toolCallId: 'c1', kind: 'read', status: 'pending', rawInput: { path: '/some/file.txt' } },
+      });
+
+      // Consumer responds to the permission_request event
+      const consumerPromise = (async () => {
+        for await (const event of stream) {
+          if (event.kind === 'permission_request') {
+            await event.respond({ kind: 'allow_once' });
+          }
+          if (event.kind === 'stop') break;
         }
-        return items;
       })();
 
       promptResolve({ stopReason: 'end_turn' });
 
-      const updates = await collectPromise;
-      expect(updates).toHaveLength(0);
+      const [permResponse] = await Promise.all([permissionPromise, consumerPromise]);
+      expect(permResponse).toBeDefined();
     });
   });
 
@@ -272,128 +307,6 @@ describe('DefaultACPClientManager', () => {
       expect(mocks.connection.cancel).toHaveBeenCalledWith(
         expect.objectContaining({ sessionId: 'test-session-id' }),
       );
-    });
-  });
-
-  // ---- Permission handlers ---------------------------------------------------
-
-  describe('onPermissionRequest', () => {
-    it('routes requestPermission to onPermissionRequest catch-all handler', async () => {
-      const subprocess = await manager.spawnSubprocess('agent', []);
-      const session = await manager.createSession(subprocess, '/tmp', []);
-
-      const handler = vi.fn<import('./client.js').PermissionHandler>()
-        .mockResolvedValue(makePermissionOption('perm-1'));
-      manager.onPermissionRequest(session, handler);
-
-      const client = getClient();
-      const response = await client.requestPermission({
-        sessionId: 'test-session-id',
-        options: [],
-        toolCall: { toolCallId: 'c1', kind: 'other', status: 'pending' },
-      });
-
-      expect(handler).toHaveBeenCalledOnce();
-      expect(response.outcome).toMatchObject({ outcome: 'selected', optionId: 'perm-1' });
-    });
-
-    it('routes fs.read kind to onFsRead handler', async () => {
-      const subprocess = await manager.spawnSubprocess('agent', []);
-      const session = await manager.createSession(subprocess, '/tmp', []);
-
-      const fsReadHandler = vi.fn<import('./client.js').FsPermissionHandler>()
-        .mockResolvedValue(makePermissionOption('read-opt'));
-      manager.onFsRead(session, fsReadHandler);
-
-      const client = getClient();
-      const response = await client.requestPermission({
-        sessionId: 'test-session-id',
-        options: [],
-        toolCall: { toolCallId: 'c2', kind: 'read', status: 'pending', rawInput: { path: '/some/file.txt' } },
-      });
-
-      expect(fsReadHandler).toHaveBeenCalledWith('/some/file.txt');
-      expect(response.outcome).toMatchObject({ outcome: 'selected', optionId: 'read-opt' });
-    });
-
-    it('routes write/edit kind to onFsWrite handler', async () => {
-      const subprocess = await manager.spawnSubprocess('agent', []);
-      const session = await manager.createSession(subprocess, '/tmp', []);
-
-      const fsWriteHandler = vi.fn<import('./client.js').FsPermissionHandler>()
-        .mockResolvedValue(makePermissionOption('write-opt'));
-      manager.onFsWrite(session, fsWriteHandler);
-
-      const client = getClient();
-      const response = await client.requestPermission({
-        sessionId: 'test-session-id',
-        options: [],
-        toolCall: { toolCallId: 'c3', kind: 'edit', status: 'pending', rawInput: { path: '/file.ts' } },
-      });
-
-      expect(fsWriteHandler).toHaveBeenCalledWith('/file.ts');
-      expect(response.outcome).toMatchObject({ outcome: 'selected', optionId: 'write-opt' });
-    });
-
-    it('routes execute kind to onTerminalCreate handler', async () => {
-      const subprocess = await manager.spawnSubprocess('agent', []);
-      const session = await manager.createSession(subprocess, '/tmp', []);
-
-      const terminalHandler = vi.fn<import('./client.js').TerminalPermissionHandler>()
-        .mockResolvedValue(makePermissionOption('term-opt'));
-      manager.onTerminalCreate(session, terminalHandler);
-
-      const client = getClient();
-      const response = await client.requestPermission({
-        sessionId: 'test-session-id',
-        options: [],
-        toolCall: {
-          toolCallId: 'c4',
-          kind: 'execute',
-          status: 'pending',
-          rawInput: { command: 'npm test' },
-        },
-      });
-
-      expect(terminalHandler).toHaveBeenCalledWith('npm test');
-      expect(response.outcome).toMatchObject({ outcome: 'selected', optionId: 'term-opt' });
-    });
-
-    it('returns cancelled outcome when no handler is registered', async () => {
-      const subprocess = await manager.spawnSubprocess('agent', []);
-      await manager.createSession(subprocess, '/tmp', []);
-
-      const client = getClient();
-      const response = await client.requestPermission({
-        sessionId: 'test-session-id',
-        options: [],
-        toolCall: { toolCallId: 'c5', kind: 'other', status: 'pending' },
-      });
-
-      expect(response.outcome).toMatchObject({ outcome: 'cancelled' });
-    });
-
-    it('specific handler takes precedence over catch-all for fs.read', async () => {
-      const subprocess = await manager.spawnSubprocess('agent', []);
-      const session = await manager.createSession(subprocess, '/tmp', []);
-
-      const catchAll = vi.fn<import('./client.js').PermissionHandler>()
-        .mockResolvedValue(makePermissionOption('generic'));
-      const specific = vi.fn<import('./client.js').FsPermissionHandler>()
-        .mockResolvedValue(makePermissionOption('specific'));
-
-      manager.onPermissionRequest(session, catchAll);
-      manager.onFsRead(session, specific);
-
-      const client = getClient();
-      await client.requestPermission({
-        sessionId: 'test-session-id',
-        options: [],
-        toolCall: { toolCallId: 'c6', kind: 'read', status: 'pending' },
-      });
-
-      expect(specific).toHaveBeenCalledOnce();
-      expect(catchAll).not.toHaveBeenCalled();
     });
   });
 });

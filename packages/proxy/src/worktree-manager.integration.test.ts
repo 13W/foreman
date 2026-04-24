@@ -29,6 +29,10 @@ function makeConfig(repoDir: string, worktreeBaseDir: string): ProxyConfig {
     },
     role: { description: 'test', skills: [] },
     mcps: { personal: [] },
+    permissions: {
+      terminal_whitelist: [],
+      permission_timeout_sec: 300,
+    },
     worktrees: {
       base_dir: worktreeBaseDir,
       branch_prefix: 'foreman/task-',
