@@ -1,0 +1,30 @@
+{
+  "name": "@foreman-stack/planner",
+  "version": "0.1.0",
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "bin": {
+    "foreman-planner": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc --build",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "^0.18.2",
+    "@foreman-stack/shared": "workspace:*",
+    "pino": "^10.3.1",
+    "yaml": "^2.8.3",
+    "zod": "^4.0.0"
+  }
+}
