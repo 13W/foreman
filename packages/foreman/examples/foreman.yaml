@@ -1,0 +1,50 @@
+# Foreman reference configuration
+# Copy this file, adjust to your needs, and run:
+#   foreman --config ./foreman.yaml
+
+foreman:
+  name: "my-foreman"
+  version: "0.1.0"
+  working_dir: "/path/to/project"
+
+llm:
+  backend: "anthropic"
+  model: "claude-sonnet-4-7"
+  api_key_env: "ANTHROPIC_API_KEY"
+  max_tokens_per_turn: 8192
+
+workers:
+  - url: "http://127.0.0.1:7001"
+    name_hint: "refactorer"
+  - url: "http://127.0.0.1:7002"
+    name_hint: "test-writer"
+  - url: "http://127.0.0.1:7003"
+    name_hint: "planner"
+
+mcps:
+  personal: []
+  # personal:
+  #   - name: "github"
+  #     command: "gh-mcp"
+  #     args: ["--stdio"]
+  #     env: {}
+  #     read_only_tools: []   # force auto-approve for specific tools
+  #     write_tools: []       # force escalate for specific tools
+
+  injected: []
+  # injected:
+  #   - name: "github"
+  #     command: "gh-mcp"
+  #     args: ["--stdio"]
+
+runtime:
+  max_concurrent_sessions: 5
+  max_parallel_dispatches: 5
+  default_task_timeout_sec: 1800
+  worker_discovery_timeout_sec: 10
+  planner_response_timeout_sec: 300
+
+logging:
+  level: "info"      # trace | debug | info | warn | error | fatal
+  format: "json"     # json | pretty
+  destination: "stderr"
