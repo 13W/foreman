@@ -3,6 +3,10 @@ import { parseArgs } from 'node:util';
 import { createLogger } from './logger.js';
 import { loadConfig, DEFAULT_CONFIG_PATH } from './config.js';
 import { ProxyServer } from './proxy-server.js';
+import { DefaultA2AServer } from './a2a/server.js';
+import { SubprocessPool } from './subprocess-pool.js';
+import { WorktreeManager } from './worktree-manager.js';
+import { DefaultACPClientManager } from './acp/client.js';
 
 const { values } = parseArgs({
   options: {
@@ -47,7 +51,11 @@ logger.info(
   'Starting foreman-proxy',
 );
 
-const server = new ProxyServer(config, logger);
+const acpClientManager = new DefaultACPClientManager();
+const subprocessPool = new SubprocessPool(config, acpClientManager);
+const worktreeManager = new WorktreeManager(config);
+const a2aServer = new DefaultA2AServer();
+const server = new ProxyServer(config, a2aServer, subprocessPool, worktreeManager, acpClientManager, logger);
 const shutdownTimeout = config.runtime.task_hard_timeout_sec > 0 ? 30_000 : 30_000;
 
 let shuttingDown = false;
