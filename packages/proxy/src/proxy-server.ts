@@ -9,6 +9,7 @@ import type {
   StreamEvent,
   TaskHandle,
   TaskPayload,
+  TaskResult,
 } from '@foreman-stack/shared';
 import type pino from 'pino';
 import { evaluateFsPermission, evaluateTerminalPermission, type PolicyDecision } from './permission-policy.js';
@@ -124,7 +125,7 @@ export class ProxyServer {
     });
 
     // 6. Run the prompt
-    let result;
+    let result: TaskResult = buildErrorTaskResult(new Error('unknown'), worktreeResult);
     try {
       const stopReason = await this.runPrompt(payload, handle, pooled.session, worktreeResult);
       result = buildTaskResult(stopReason, worktreeResult);
@@ -135,7 +136,7 @@ export class ProxyServer {
       await pooled.release();
       await this.worktreeManager.cleanup(
         taskId,
-        result?.status === 'completed' ? 'completed' : result?.status ?? 'failed',
+        result.status === 'completed' ? 'completed' : result.status,
       );
     }
 

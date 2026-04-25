@@ -95,6 +95,9 @@ importers:
 
   packages/shared:
     dependencies:
+      '@a2a-js/sdk':
+        specifier: ^0.3.13
+        version: 0.3.13(express@5.2.1)
       uuid:
         specifier: ^11.0.0
         version: 11.1.0

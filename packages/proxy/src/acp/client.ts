@@ -241,8 +241,13 @@ export class DefaultACPClientManager implements ACPClientManager {
     if (!queue) return { outcome: { outcome: 'cancelled' } };
 
     const acpType = toolKindToAcpType(toolCall.kind);
+    if (acpType === null) {
+      // Unknown tool kind — cancel rather than fabricate a permission request
+      return { outcome: { outcome: 'cancelled' } };
+    }
+
     const request: ACPPermissionRequest = {
-      type: acpType ?? 'fs.read',
+      type: acpType,
       path: (acpType === 'fs.read' || acpType === 'fs.write') ? extractPath(toolCall.rawInput) : undefined,
       command: acpType === 'terminal.create' ? extractCommand(toolCall.rawInput) : undefined,
     };

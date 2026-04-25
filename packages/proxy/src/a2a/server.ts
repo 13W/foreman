@@ -21,6 +21,7 @@ export class DefaultA2AServer implements A2AServer {
   private readonly app: express.Application;
   private server?: http.Server;
   private taskHandlerFn?: TaskHandler;
+  private boundAddr?: string;
 
   constructor() {
     this.app = express();
@@ -37,7 +38,7 @@ export class DefaultA2AServer implements A2AServer {
 
     // Mount agent card at the SDK-defined path
     this.app.use(`/${AGENT_CARD_PATH}`, agentCardHandler({ agentCardProvider: requestHandler }));
-    this.app.post(
+    this.app.use(
       '/a2a/jsonrpc',
       jsonRpcHandler({ requestHandler, userBuilder: UserBuilder.noAuthentication }),
     );
@@ -67,12 +68,19 @@ export class DefaultA2AServer implements A2AServer {
     return this.executor.requestInput(taskId, request, opts);
   }
 
+  getBoundAddress(): string {
+    if (!this.boundAddr) throw new Error('Server not yet listening');
+    return this.boundAddr;
+  }
+
   listen(bindAddr: string): Promise<void> {
     return new Promise((resolve, reject) => {
       const { host, port } = parseBindAddr(bindAddr);
       this.server = http.createServer(this.app);
       this.server.listen(port, host, () => {
-        logger.info({ bindAddr }, 'A2A server listening');
+        const actualPort = (this.server!.address() as import('node:net').AddressInfo).port;
+        this.boundAddr = `${host}:${actualPort}`;
+        logger.info({ bindAddr: this.boundAddr }, 'A2A server listening');
         resolve();
       });
       this.server.on('error', reject);
