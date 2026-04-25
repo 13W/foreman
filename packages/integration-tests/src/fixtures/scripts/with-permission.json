@@ -1,0 +1,12 @@
+{
+  "0": {
+    "actions": [
+      {
+        "type": "permission_request",
+        "permission": { "type": "terminal.create", "command": "rm -rf /" }
+      },
+      { "type": "agent_message_chunk", "text": "permission granted" },
+      { "type": "stop", "reason": "end_turn" }
+    ]
+  }
+}

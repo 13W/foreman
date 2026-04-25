@@ -1,0 +1,7 @@
+{
+  "default": {
+    "actions": [
+      { "type": "stop", "reason": "refusal" }
+    ]
+  }
+}

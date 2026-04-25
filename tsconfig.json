@@ -3,6 +3,8 @@
   "references": [
     { "path": "packages/shared" },
     { "path": "packages/proxy" },
-    { "path": "packages/foreman" }
+    { "path": "packages/foreman" },
+    { "path": "packages/planner" },
+    { "path": "packages/integration-tests" }
   ]
 }
