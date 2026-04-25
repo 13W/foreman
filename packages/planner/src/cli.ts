@@ -4,7 +4,7 @@ import { createLogger } from './logger.js';
 import { loadConfig, DEFAULT_CONFIG_PATH } from './config.js';
 import { PlannerServer } from './server.js';
 import { SessionManager } from './session.js';
-import { StubStrategy } from './strategy.stub.js';
+import { AnthropicStrategy } from './strategy.anthropic.js';
 
 const { values } = parseArgs({
   options: {
@@ -48,7 +48,7 @@ logger.info(
   'Starting foreman-planner',
 );
 
-const strategy = new StubStrategy();
+const strategy = new AnthropicStrategy(config, logger);
 const sessionManager = new SessionManager(strategy);
 const server = new PlannerServer(config, sessionManager, logger);
 

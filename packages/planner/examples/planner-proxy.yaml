@@ -1,0 +1,23 @@
+# Example configuration for wrapping foreman-planner via foreman-proxy
+# This allows registering the planner as a worker in the Foreman catalog
+
+agent:
+  name: "planner"
+  description: "Expert agent for decomposing complex tasks into structured plans."
+  skills:
+    - "task_decomposition"
+    - "planning"
+
+subprocess:
+  command: "node"
+  args:
+    - "dist/cli.js"
+    - "--config"
+    - "planner.yaml"
+
+# Example planner.yaml for the subprocess
+# planner:
+#   name: "foreman-planner"
+# llm:
+#   model: "claude-3-5-sonnet-20240620"
+#   api_key_env: "ANTHROPIC_API_KEY"

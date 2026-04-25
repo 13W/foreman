@@ -22,9 +22,11 @@
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^0.18.2",
+    "@anthropic-ai/sdk": "^0.90.0",
     "@foreman-stack/shared": "workspace:*",
     "pino": "^10.3.1",
     "yaml": "^2.8.3",
-    "zod": "^4.0.0"
+    "zod": "^4.0.0",
+    "zod-to-json-schema": "^3.24.1"
   }
 }
