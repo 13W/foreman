@@ -28,6 +28,8 @@ const AgentSkillSchema = z.object({
   examples: z.array(z.string()).default([]),
 });
 
+// Proxy's MCP config: passthrough to wrapped_agent. Tool classification
+// (read vs write) is the wrapped agent's concern, not the proxy's.
 const McpServerSchema = z.object({
   name: z.string(),
   command: z.string(),

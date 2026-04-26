@@ -4,6 +4,10 @@ import { join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { z } from 'zod';
 
+// Foreman's MCP config: includes read_only_tools / write_tools because
+// foreman uses these for permission policy when injecting MCP servers
+// into dispatched tasks. Tools listed in write_tools require explicit
+// permission; tools in read_only_tools auto-allow.
 const McpServerSchema = z.object({
   name: z.string(),
   command: z.string(),

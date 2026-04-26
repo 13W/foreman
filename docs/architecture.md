@@ -4,7 +4,7 @@ Foreman Stack is an orchestration layer for multi-agent systems, designed to ena
 
 ## The problem: single-session bottlenecks
 
-Modern coding agents like Claude Code or Gemini CLI are powerful but are generally limited to a single conversation context. When a project requires parallel work across multiple specialized roles—such as simultaneous refactoring, test writing, and documentation updates—a single agent becomes a bottleneck.
+Modern coding agents like Claude Code or Gemini CLI are useful but are generally limited to a single conversation context. When a project requires parallel work across multiple specialized roles—such as simultaneous refactoring, test writing, and documentation updates—a single agent becomes a bottleneck.
 
 Foreman Stack solves this by introducing a hierarchical orchestration layer that can manage multiple specialized agents in parallel, providing each with its own isolated environment (Git worktree).
 

@@ -1,23 +1,43 @@
-# Example configuration for wrapping foreman-planner via foreman-proxy
-# This allows registering the planner as a worker in the Foreman catalog
+# Wraps the foreman-planner as an A2A worker so foreman can discover it
+# as a planner via the task_decomposition skill.
 
-agent:
+proxy:
   name: "planner"
-  description: "Expert agent for decomposing complex tasks into structured plans."
-  skills:
-    - "task_decomposition"
-    - "planning"
+  version: "0.1.0"
+  bind: "127.0.0.1:7099"
 
-subprocess:
+wrapped_agent:
   command: "node"
   args:
-    - "dist/cli.js"
+    - "../planner/dist/cli.js"
     - "--config"
-    - "planner.yaml"
+    - "./planner.yaml"
+  env: {}
+  cwd_strategy: "worktree"
+  startup_timeout_sec: 30
 
-# Example planner.yaml for the subprocess
+role:
+  description: |
+    Plan decomposition specialist. Takes a high-level goal and emits a
+    structured Plan with batches of subtasks for the worker pool.
+
+  skills:
+    - id: "task_decomposition"
+      name: "Task decomposition"
+      description: "Decompose a high-level goal into a structured plan of subtasks."
+      tags: ["planning", "decomposition"]
+      examples:
+        - "Refactor the auth module and add tests"
+        - "Migrate from CommonJS to ESM across the monorepo"
+
+worktrees:
+  base_dir: "./worktrees/planner"
+
+# Example planner.yaml for the subprocess (reference)
+#
 # planner:
 #   name: "foreman-planner"
+#
 # llm:
 #   model: "claude-3-5-sonnet-20240620"
 #   api_key_env: "ANTHROPIC_API_KEY"
