@@ -102,6 +102,14 @@ export class ProxyAgentExecutor implements AgentExecutor {
     }
 
     bus.publish({
+      kind: 'task',
+      id: taskId,
+      contextId: ctx.contextId,
+      status: { state: 'submitted', timestamp: new Date().toISOString() },
+      history: [],
+    } as any);
+
+    bus.publish({
       kind: 'status-update',
       taskId,
       contextId: ctx.contextId,
@@ -153,6 +161,14 @@ export class ProxyAgentExecutor implements AgentExecutor {
       ctx.pendingInput.deferred.resolve({ kind: 'cancelled' });
       ctx.pendingInput = undefined;
     }
+
+    ctx.bus.publish({
+      kind: 'status-update',
+      taskId,
+      contextId: ctx.contextId,
+      status: { state: 'canceled' },
+      final: true,
+    });
 
     ctx.completionDeferred.resolve();
     this.tasks.delete(taskId);
@@ -235,9 +251,16 @@ export class ProxyAgentExecutor implements AgentExecutor {
       kind: 'status-update',
       taskId,
       contextId: ctx.contextId,
-      status: { state: 'input-required' },
+      status: {
+        state: 'input-required',
+        message: {
+          kind: 'message',
+          messageId: requestId,
+          role: 'agent',
+          parts: [{ kind: 'data', data: request as unknown as Record<string, unknown> }],
+        },
+      },
       final: true,
-      metadata: { requestId, request },
     });
 
     try {

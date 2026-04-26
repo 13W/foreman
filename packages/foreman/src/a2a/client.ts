@@ -178,6 +178,7 @@ function mapSdkEvent(knownTaskId: string, event: SdkStreamEvent): StreamEvent {
 
 function isTerminal(event: SdkStreamEvent): boolean {
   if (event.kind === 'status-update') {
+    if (event.status.state === 'input-required') return false;
     return event.final || TERMINAL_STATES.has(event.status.state);
   }
   if (event.kind === 'task') {

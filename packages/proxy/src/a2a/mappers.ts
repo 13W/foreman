@@ -123,6 +123,7 @@ type StopReasonString = 'end_turn' | 'max_tokens' | 'refusal' | 'cancelled' | 't
 export function buildTaskResult(
   stopReason: StopReasonString,
   worktreeResult: WorktreeResult,
+  outputText = '',
 ): TaskResult {
   let status: 'completed' | 'failed' | 'cancelled';
   let stop_reason: string;
@@ -153,7 +154,7 @@ export function buildTaskResult(
   return {
     status,
     stop_reason: stop_reason as any,
-    summary: '',
+    summary: outputText,
     branch_ref: worktreeResult.branchName,
     session_transcript_ref: '',
     error: null,

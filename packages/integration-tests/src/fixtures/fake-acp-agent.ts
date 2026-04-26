@@ -77,7 +77,7 @@ const agent: Agent = {
                 kind: 'execute',
                 title: 'Permission request',
                 rawInput: action.permission,
-                status: 'running'
+                status: 'pending'
             },
             options: [] // Simplified for now
           });

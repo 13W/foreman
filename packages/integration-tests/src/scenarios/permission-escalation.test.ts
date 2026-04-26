@@ -9,11 +9,7 @@ describe('Permission Escalation Scenario', () => {
     await cleanupAll();
   });
 
-  it.skip('should route worker permission requests directly to the user', async () => {
-    // TODO: BUG in DefaultA2AClient: vulnerable to race condition where 
-    // status-update event from proxy arrives BEFORE task event.
-    // Error: "expected task event first, got status-update"
-    // Fix being prepared; unskip when dispatchTask is robust.
+  it('should route worker permission requests directly to the user', async () => {
     const testTempDir = join(tmpdir(), `permission-test-${Date.now()}`);
     mkdirSync(testTempDir, { recursive: true });
     

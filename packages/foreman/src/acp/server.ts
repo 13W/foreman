@@ -72,7 +72,7 @@ export class DefaultACPAgentServer implements ACPAgentServer {
         kind: acpTypeToToolKind(request.type),
         title: request.path ?? request.command ?? request.type,
         rawInput: { path: request.path, command: request.command },
-        status: 'running',
+        status: 'pending',
       },
       options: [allowOnce, rejectOnce],
     });

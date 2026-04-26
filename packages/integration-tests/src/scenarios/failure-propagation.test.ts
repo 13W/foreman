@@ -7,11 +7,7 @@ describe('Failure Propagation Scenario', () => {
     await cleanupAll();
   });
 
-  it.skip('should abort the plan and surface the error if a subtask fails', async () => {
-    // TODO: BUG in iteration-1 t4.7-min: foreman._runWorkerTask returns failed
-    // TaskResult as opaque JSON string; _executePlan does not inspect status
-    // and continues to next subtask instead of aborting.
-    // Fix being prepared in parallel; unskip when foreman aborts on failed status.
+  it('should abort the plan and surface the error if a subtask fails', async () => {
     // 1. Setup Mock Anthropic Server
     const mockAnthropic = new MockAnthropicServer([
       // Turn 1: Planning

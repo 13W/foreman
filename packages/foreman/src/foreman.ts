@@ -68,16 +68,35 @@ function isPermissionRequestPart(part: unknown): boolean {
 }
 
 function isPermissionEvent(event: StreamEvent): boolean {
-  if (event.type !== 'message') return false;
-  const data = event.data as Record<string, unknown> | null | undefined;
-  const parts = data?.['parts'];
-  if (!Array.isArray(parts)) return false;
-  return parts.some(isPermissionRequestPart);
+  if (event.type === 'message') {
+    const data = event.data as Record<string, unknown> | null | undefined;
+    const parts = data?.['parts'];
+    if (!Array.isArray(parts)) return false;
+    return parts.some(isPermissionRequestPart);
+  }
+  if (event.type === 'status') {
+    const data = event.data as Record<string, unknown> | null | undefined;
+    if (data?.['state'] !== 'input-required') return false;
+    const message = data['message'] as Record<string, unknown> | null | undefined;
+    const parts = message?.['parts'];
+    if (!Array.isArray(parts)) return false;
+    return parts.some(isPermissionRequestPart);
+  }
+  return false;
 }
 
 function extractPermissionRequest(event: StreamEvent): PermissionRequest | null {
-  const data = event.data as Record<string, unknown> | null | undefined;
-  const parts = (data?.['parts'] as unknown[]) ?? [];
+  let parts: unknown[];
+  if (event.type === 'message') {
+    const data = event.data as Record<string, unknown> | null | undefined;
+    parts = (data?.['parts'] as unknown[]) ?? [];
+  } else if (event.type === 'status') {
+    const data = event.data as Record<string, unknown> | null | undefined;
+    const message = data?.['message'] as Record<string, unknown> | null | undefined;
+    parts = (message?.['parts'] as unknown[]) ?? [];
+  } else {
+    return null;
+  }
   for (const part of parts) {
     if (isPermissionRequestPart(part)) {
       const p = part as Record<string, unknown>;
@@ -279,17 +298,16 @@ export class Foreman {
         // TODO(t4.5): PlanExecutor will replace this serial loop with parallel batch dispatch and proper failure handling.
         results = await this._executePlan(capturedPlan, userText, sessionId);
       } catch (err) {
+        let failureInfo: string;
         if (err instanceof PlanAbortedError) {
           const detail = err.taskResult.error?.message ?? err.taskResult.stop_reason ?? err.taskResult.status;
-          await this.acpServer.sendUpdate(sessionId, [
-            { type: 'text', text: `Subtask "${err.subtaskId}" failed: ${detail}` },
-          ]);
+          failureInfo = `Subtask "${err.subtaskId}" failed: ${detail}`;
         } else {
           const msg = err instanceof Error ? err.message : String(err);
-          await this.acpServer.sendUpdate(sessionId, [
-            { type: 'text', text: `Plan execution failed: ${msg}` },
-          ]);
+          failureInfo = `Plan execution failed: ${msg}`;
         }
+        const summary = await this._synthesize([failureInfo], userText);
+        await this.acpServer.sendUpdate(sessionId, [{ type: 'text', text: summary }]);
         return;
       }
       const summary = await this._synthesize(results, userText);

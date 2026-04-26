@@ -127,8 +127,8 @@ export class ProxyServer {
     // 6. Run the prompt
     let result: TaskResult = buildErrorTaskResult(new Error('unknown'), worktreeResult);
     try {
-      const stopReason = await this.runPrompt(payload, handle, pooled.session, worktreeResult);
-      result = buildTaskResult(stopReason, worktreeResult);
+      const { stopReason, outputText } = await this.runPrompt(payload, handle, pooled.session, worktreeResult);
+      result = buildTaskResult(stopReason, worktreeResult, outputText);
     } catch (err) {
       log.error({ err }, 'runPrompt failed');
       result = buildErrorTaskResult(err, worktreeResult);
@@ -148,23 +148,27 @@ export class ProxyServer {
     handle: TaskHandle,
     session: SessionHandle,
     worktreeResult: WorktreeResult,
-  ): Promise<string> {
+  ): Promise<{ stopReason: string; outputText: string }> {
     const systemPrompt = buildSystemPrompt(this.config, payload);
     const stream = this.acpClientManager.sendPrompt(session, systemPrompt);
+    let outputText = '';
 
     for await (const event of stream) {
       if (event.kind === 'permission_request') {
         await this.handlePermissionEvent(handle.taskId, event, worktreeResult);
       } else if (event.kind === 'stop') {
-        return event.reason;
+        return { stopReason: event.reason, outputText };
       } else {
+        if (event.kind === 'agent_message_chunk' && event.content.type === 'text') {
+          outputText += event.content.text;
+        }
         const mapped = mapPromptEventToStreamEvent(event);
         if (mapped) {
           await this.a2aServer.sendUpdate(handle.taskId, { ...mapped, taskId: handle.taskId } as StreamEvent);
         }
       }
     }
-    return 'cancelled';
+    return { stopReason: 'cancelled', outputText };
   }
 
   private async handlePermissionEvent(

@@ -36,6 +36,7 @@ function delayWithJitter(attempt: number): Promise<void> {
 function isTerminalEvent(event: StreamEvent): boolean {
   if (event.type !== 'status') return false;
   const data = event.data as { state?: string; final?: boolean };
+  if (data.state === 'input-required') return false;
   return data.final === true || TERMINAL_STATES.has(data.state ?? '');
 }
 
@@ -85,7 +86,6 @@ async function* makeEventStream(
         yield event;
         if (isTerminalEvent(event)) return;
       }
-      return;
     } catch (streamErr) {
       logger.debug({ taskId, err: String(streamErr) }, 'stream failed, falling back to polling');
     }
