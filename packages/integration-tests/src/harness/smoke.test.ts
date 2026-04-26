@@ -31,17 +31,17 @@ describe('Harness Smoke Test', () => {
     // 6. Prompt
     const promptResult = await client.prompt(sessionId, 'hello');
     
-    // Foreman in current state is a stub, so it should respond with something predictable
     expect(promptResult.stopReason).toBe('end_turn');
-    
+
     // Check if we got some updates
     expect(client.updates.length).toBeGreaterThan(0);
-    
-    // The stub foreman response
+
+    // The proxy worker has no task_decomposition skill, so foreman responds with
+    // the no-planner error message (TODO t4.8 will replace this with a user prompt).
     const lastUpdate = client.updates[client.updates.length - 1];
     expect(lastUpdate.sessionUpdate).toBe('agent_message_chunk');
     if (lastUpdate.sessionUpdate === 'agent_message_chunk' && lastUpdate.content.type === 'text') {
-      expect(lastUpdate.content.text).toContain('Foreman is starting up');
+      expect(lastUpdate.content.text).toContain('No planner agent available');
     }
   }, 20000);
 });
