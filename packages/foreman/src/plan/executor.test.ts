@@ -29,7 +29,7 @@ function makeMockHandle(taskId: string, agentUrl = 'http://mock.test'): MockHand
   let terminated = false;
   let cancelled = false;
 
-  const gen: AsyncGenerator<StreamEvent> = {
+  const genBase = {
     async next(): Promise<IteratorResult<StreamEvent>> {
       if (queue.length > 0) {
         return { value: queue.shift()!, done: false };
@@ -55,9 +55,13 @@ function makeMockHandle(taskId: string, agentUrl = 'http://mock.test'): MockHand
       throw err;
     },
     [Symbol.asyncIterator]() {
-      return this;
+      return this as AsyncGenerator<StreamEvent>;
+    },
+    async [Symbol.asyncDispose](): Promise<void> {
+      await genBase.return(undefined);
     },
   };
+  const gen = genBase as unknown as AsyncGenerator<StreamEvent>;
 
   const cancelFn = async () => {
     cancelled = true;
