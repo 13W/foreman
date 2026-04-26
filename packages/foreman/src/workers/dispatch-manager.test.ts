@@ -27,9 +27,15 @@ const mockClient: A2AClient = {
 const WORKER_URL = 'http://worker.local';
 
 const basePayload: TaskPayload = {
-  task_id: 'parent-task',
-  goal: 'do something',
-  inputs: {},
+  description: 'do something',
+  expected_output: null,
+  inputs: { relevant_files: [], constraints: [], context_from_prior_tasks: [] },
+  originator_intent: 'test',
+  max_delegation_depth: 3,
+  parent_task_id: null,
+  base_branch: null,
+  timeout_sec: null,
+  injected_mcps: [],
 };
 
 function makeStatusEvent(

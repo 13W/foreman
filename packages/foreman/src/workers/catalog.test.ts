@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { WorkerCatalog, PLANNER_SKILL_ID } from './catalog.js';
-import type { A2AClient, AgentCardMetadata } from '@foreman-stack/shared';
+import type { A2AClient, AgentCardMetadata, AgentSkill } from '@foreman-stack/shared';
 
 // ---------------------------------------------------------------------------
 // Mock A2AClient
@@ -22,7 +22,7 @@ const mockClient: A2AClient = {
 // ---------------------------------------------------------------------------
 
 function makeCard(name: string, skills: Array<{ id: string }> = []): AgentCardMetadata {
-  return { name, url: `http://${name}.local`, version: '1.0.0', skills };
+  return { name, url: `http://${name}.local`, version: '1.0.0', skills: skills as AgentSkill[] };
 }
 
 const WORKER_A = 'http://worker-a.local';
