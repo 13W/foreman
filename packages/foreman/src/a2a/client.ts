@@ -27,6 +27,7 @@ export class DefaultA2AClient implements A2AClient {
   private readonly _resolver: DefaultAgentCardResolver;
   private readonly _clientCache = new Map<string, Client>();
   private readonly _taskRegistry = new Map<string, TaskEntry>();
+  private readonly _streamRegistry = new Map<string, AsyncGenerator<SdkStreamEvent>>();
 
   constructor(options: DefaultA2AClientOptions = {}) {
     this._factory = new ClientFactory(ClientFactoryOptions.default);
@@ -57,35 +58,46 @@ export class DefaultA2AClient implements A2AClient {
 
   async dispatchTask(url: string, payload: TaskPayload): Promise<string> {
     const client = await this._getOrCreateClient(url);
-    let result;
+    const stream = client.sendMessageStream({
+      message: {
+        kind: 'message',
+        messageId: randomUUID(),
+        role: 'user',
+        parts: [{ kind: 'data', data: payload }],
+      },
+    }) as AsyncGenerator<SdkStreamEvent>;
+
+    let firstResult: IteratorResult<SdkStreamEvent>;
     try {
-      result = await client.sendMessage({
-        message: {
-          kind: 'message',
-          messageId: randomUUID(),
-          role: 'user',
-          parts: [{ kind: 'data', data: payload }],
-        },
-        configuration: { blocking: false },
-      });
+      firstResult = await stream.next();
     } catch (err) {
       throw new DispatchFailedError(url, err instanceof Error ? err.message : String(err));
     }
-    if (result.kind !== 'task') {
-      throw new DispatchFailedError(url, `expected task response, got ${result.kind}`);
+
+    if (firstResult.done || firstResult.value.kind !== 'task') {
+      const got = firstResult.done ? 'done' : (firstResult.value as SdkStreamEvent).kind;
+      throw new DispatchFailedError(url, `expected task event first, got ${got}`);
     }
-    const task = result as Task;
+
+    const task = firstResult.value as Task;
+    this._streamRegistry.set(task.id, stream);
     this._taskRegistry.set(task.id, { client, contextId: task.contextId });
     logger.debug({ taskId: task.id, agentUrl: url }, 'task dispatched');
     return task.id;
   }
 
   async *streamTask(taskId: string): AsyncIterableIterator<StreamEvent> {
-    const entry = this._requireTaskEntry(taskId);
-    const stream = entry.client.resubscribeTask({ id: taskId });
-    for await (const event of stream) {
-      yield mapSdkEvent(taskId, event as SdkStreamEvent);
-      if (isTerminal(event as SdkStreamEvent)) return;
+    this._requireTaskEntry(taskId);
+    const stream = this._streamRegistry.get(taskId);
+    if (!stream) throw new TaskNotFoundError(taskId);
+
+    try {
+      for await (const event of stream) {
+        yield mapSdkEvent(taskId, event as SdkStreamEvent);
+        if (isTerminal(event as SdkStreamEvent)) return;
+      }
+    } finally {
+      this._streamRegistry.delete(taskId);
     }
   }
 
@@ -139,7 +151,7 @@ function mapSdkEvent(knownTaskId: string, event: SdkStreamEvent): StreamEvent {
       return {
         type: 'status',
         taskId: event.taskId,
-        data: { state: event.status.state, final: event.final },
+        data: { state: event.status.state, final: event.final, message: event.status.message },
         timestamp: event.status.timestamp,
       };
     case 'artifact-update':

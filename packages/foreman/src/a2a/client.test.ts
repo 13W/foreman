@@ -9,14 +9,12 @@ import type { TaskPayload } from '@foreman-stack/shared';
 
 const mockSendMessage = vi.fn();
 const mockSendMessageStream = vi.fn();
-const mockResubscribeTask = vi.fn();
 const mockGetTask = vi.fn();
 const mockCancelTask = vi.fn();
 
 const mockClient = {
   sendMessage: mockSendMessage,
   sendMessageStream: mockSendMessageStream,
-  resubscribeTask: mockResubscribeTask,
   getTask: mockGetTask,
   cancelTask: mockCancelTask,
   getAgentCard: vi.fn(),
@@ -124,19 +122,19 @@ describe('dispatchTask', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockCreateFromUrl.mockResolvedValue(mockClient);
-    mockSendMessage.mockResolvedValue(mockTask);
+    mockSendMessageStream.mockReturnValue(fakeStream([mockTask]));
   });
 
-  it('returns taskId from sendMessage response', async () => {
+  it('returns taskId from first task event in stream', async () => {
     const client = new DefaultA2AClient();
     const id = await client.dispatchTask(agentUrl, basePayload);
     expect(id).toBe(taskId);
   });
 
-  it('sends payload as data part in message', async () => {
+  it('sends payload as data part in message via sendMessageStream', async () => {
     const client = new DefaultA2AClient();
     await client.dispatchTask(agentUrl, basePayload);
-    const [params] = mockSendMessage.mock.calls[0];
+    const [params] = mockSendMessageStream.mock.calls[0];
     expect(params.message.kind).toBe('message');
     expect(params.message.role).toBe('user');
     expect(params.message.parts[0]).toMatchObject({ kind: 'data', data: basePayload });
@@ -145,18 +143,21 @@ describe('dispatchTask', () => {
   it('reuses cached client for same URL', async () => {
     const client = new DefaultA2AClient();
     await client.dispatchTask(agentUrl, basePayload);
+    mockSendMessageStream.mockReturnValue(fakeStream([{ ...mockTask, id: 'task-2' }]));
     await client.dispatchTask(agentUrl, basePayload);
     expect(mockCreateFromUrl).toHaveBeenCalledTimes(1);
   });
 
-  it('throws DispatchFailedError when sendMessage rejects', async () => {
-    mockSendMessage.mockRejectedValue(new Error('timeout'));
+  it('throws DispatchFailedError when stream next() throws', async () => {
+    mockSendMessageStream.mockReturnValue((async function* () { throw new Error('timeout'); })());
     const client = new DefaultA2AClient();
     await expect(client.dispatchTask(agentUrl, basePayload)).rejects.toBeInstanceOf(DispatchFailedError);
   });
 
-  it('throws DispatchFailedError when response is not a task', async () => {
-    mockSendMessage.mockResolvedValue({ kind: 'message', messageId: 'x', role: 'agent', parts: [] });
+  it('throws DispatchFailedError when first event is not a task', async () => {
+    mockSendMessageStream.mockReturnValue(fakeStream([
+      { kind: 'message', messageId: 'x', role: 'agent', parts: [] },
+    ]));
     const client = new DefaultA2AClient();
     await expect(client.dispatchTask(agentUrl, basePayload)).rejects.toBeInstanceOf(DispatchFailedError);
   });
@@ -169,19 +170,20 @@ describe('dispatchTask', () => {
 describe('streamTask', () => {
   const taskId = 'task-stream-1';
   const contextId = 'ctx-stream-1';
+  const taskEvent = { kind: 'task', id: taskId, contextId, status: { state: 'submitted' } };
 
   beforeEach(() => {
     vi.clearAllMocks();
     mockCreateFromUrl.mockResolvedValue(mockClient);
-    mockSendMessage.mockResolvedValue({ kind: 'task', id: taskId, contextId, status: { state: 'submitted' } });
   });
 
-  it('maps status-update events to StreamEvent', async () => {
+  it('maps status-update events to StreamEvent (including message field)', async () => {
+    const resultMessage = { kind: 'message', messageId: 'msg-1', parts: [{ kind: 'data', data: { status: 'completed' } }], role: 'agent' };
     const sdkEvents = [
       { kind: 'status-update', taskId, contextId, final: false, status: { state: 'working', timestamp: '2024-01-01T00:00:00Z' } },
-      { kind: 'status-update', taskId, contextId, final: true, status: { state: 'completed', timestamp: '2024-01-01T00:01:00Z' } },
+      { kind: 'status-update', taskId, contextId, final: true, status: { state: 'completed', timestamp: '2024-01-01T00:01:00Z', message: resultMessage } },
     ];
-    mockResubscribeTask.mockReturnValue(fakeStream(sdkEvents));
+    mockSendMessageStream.mockReturnValue(fakeStream([taskEvent, ...sdkEvents]));
 
     const client = new DefaultA2AClient();
     await client.dispatchTask(agentUrl, basePayload);
@@ -190,7 +192,7 @@ describe('streamTask', () => {
 
     expect(collected).toHaveLength(2);
     expect(collected[0]).toMatchObject({ type: 'status', taskId, data: { state: 'working', final: false } });
-    expect(collected[1]).toMatchObject({ type: 'status', taskId, data: { state: 'completed', final: true } });
+    expect(collected[1]).toMatchObject({ type: 'status', taskId, data: { state: 'completed', final: true, message: resultMessage } });
   });
 
   it('maps artifact-update events to StreamEvent', async () => {
@@ -199,7 +201,7 @@ describe('streamTask', () => {
       { kind: 'artifact-update', taskId, contextId, artifact },
       { kind: 'status-update', taskId, contextId, final: true, status: { state: 'completed' } },
     ];
-    mockResubscribeTask.mockReturnValue(fakeStream(sdkEvents));
+    mockSendMessageStream.mockReturnValue(fakeStream([taskEvent, ...sdkEvents]));
 
     const client = new DefaultA2AClient();
     await client.dispatchTask(agentUrl, basePayload);
@@ -215,7 +217,7 @@ describe('streamTask', () => {
       { kind: 'status-update', taskId, contextId, final: true, status: { state: 'completed' } },
       { kind: 'status-update', taskId, contextId, final: false, status: { state: 'working' } }, // should not be yielded
     ];
-    mockResubscribeTask.mockReturnValue(fakeStream(sdkEvents));
+    mockSendMessageStream.mockReturnValue(fakeStream([taskEvent, ...sdkEvents]));
 
     const client = new DefaultA2AClient();
     await client.dispatchTask(agentUrl, basePayload);
@@ -229,7 +231,7 @@ describe('streamTask', () => {
     const sdkEvents = [
       { kind: 'task', id: taskId, contextId, status: { state: 'failed' } },
     ];
-    mockResubscribeTask.mockReturnValue(fakeStream(sdkEvents));
+    mockSendMessageStream.mockReturnValue(fakeStream([taskEvent, ...sdkEvents]));
 
     const client = new DefaultA2AClient();
     await client.dispatchTask(agentUrl, basePayload);
@@ -254,11 +256,12 @@ describe('streamTask', () => {
 describe('pollTask', () => {
   const taskId = 'task-poll-1';
   const contextId = 'ctx-poll-1';
+  const taskEvent = { kind: 'task', id: taskId, contextId, status: { state: 'submitted' } };
 
   beforeEach(() => {
     vi.clearAllMocks();
     mockCreateFromUrl.mockResolvedValue(mockClient);
-    mockSendMessage.mockResolvedValue({ kind: 'task', id: taskId, contextId, status: { state: 'submitted' } });
+    mockSendMessageStream.mockReturnValue(fakeStream([taskEvent]));
   });
 
   it('returns latest status as StreamEvent', async () => {
@@ -285,11 +288,12 @@ describe('pollTask', () => {
 describe('cancelTask', () => {
   const taskId = 'task-cancel-1';
   const contextId = 'ctx-cancel-1';
+  const taskEvent = { kind: 'task', id: taskId, contextId, status: { state: 'working' } };
 
   beforeEach(() => {
     vi.clearAllMocks();
     mockCreateFromUrl.mockResolvedValue(mockClient);
-    mockSendMessage.mockResolvedValue({ kind: 'task', id: taskId, contextId, status: { state: 'working' } });
+    mockSendMessageStream.mockReturnValue(fakeStream([taskEvent]));
     mockCancelTask.mockResolvedValue({ id: taskId, status: { state: 'canceled' } });
   });
 
@@ -313,11 +317,12 @@ describe('cancelTask', () => {
 describe('respondToPermission', () => {
   const taskId = 'task-perm-1';
   const contextId = 'ctx-perm-1';
+  const taskEvent = { kind: 'task', id: taskId, contextId, status: { state: 'input-required' } };
 
   beforeEach(() => {
     vi.clearAllMocks();
     mockCreateFromUrl.mockResolvedValue(mockClient);
-    mockSendMessage.mockResolvedValueOnce({ kind: 'task', id: taskId, contextId, status: { state: 'input-required' } });
+    mockSendMessageStream.mockReturnValue(fakeStream([taskEvent]));
     mockSendMessage.mockResolvedValue({ kind: 'task', id: taskId, contextId, status: { state: 'working' } });
   });
 
@@ -326,8 +331,8 @@ describe('respondToPermission', () => {
     await client.dispatchTask(agentUrl, basePayload);
     await client.respondToPermission(taskId, { kind: 'allow_once' });
 
-    expect(mockSendMessage).toHaveBeenCalledTimes(2);
-    const [params] = mockSendMessage.mock.calls[1];
+    expect(mockSendMessage).toHaveBeenCalledTimes(1);
+    const [params] = mockSendMessage.mock.calls[0];
     expect(params.message.contextId).toBe(contextId);
     expect(params.message.parts[0]).toMatchObject({ kind: 'data', data: { kind: 'allow_once' } });
   });
@@ -337,7 +342,7 @@ describe('respondToPermission', () => {
     await client.dispatchTask(agentUrl, basePayload);
     await client.respondToPermission(taskId, { kind: 'reject_once' });
 
-    const [params] = mockSendMessage.mock.calls[1];
+    const [params] = mockSendMessage.mock.calls[0];
     expect(params.message.contextId).toBe(contextId);
     expect(params.message.parts[0].data).toMatchObject({ kind: 'reject_once' });
   });

@@ -365,6 +365,9 @@ export class Foreman {
           if (req) {
             await this._handleWorkerEscalation(handle.taskId, req, sessionId);
           }
+        } else if (event.type === 'status') {
+          const text = extractStatusResult(event);
+          if (text) resultText = text;
         } else if (event.type === 'artifact') {
           resultText = extractArtifactText(event);
         } else if (event.type === 'message') {
@@ -470,6 +473,21 @@ function extractArtifactText(event: StreamEvent): string {
     }
   }
   return chunks.join('');
+}
+
+function extractStatusResult(event: StreamEvent): string {
+  const data = event.data as Record<string, unknown> | null | undefined;
+  if (!data?.['final']) return '';
+  const message = data['message'] as Record<string, unknown> | null | undefined;
+  if (!message) return '';
+  const parts = (message['parts'] as unknown[]) ?? [];
+  for (const part of parts) {
+    const p = part as Record<string, unknown> | null | undefined;
+    if (p?.['kind'] === 'data' && p['data']) {
+      return JSON.stringify(p['data']);
+    }
+  }
+  return '';
 }
 
 function extractMessageText(event: StreamEvent): string {
