@@ -1,5 +1,6 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { AnthropicLLMClient } from './anthropic-client.js';
+import Anthropic from '@anthropic-ai/sdk';
 import type { ForemanConfig } from '../config.js';
 import type { Message } from './client.js';
 
@@ -223,5 +224,33 @@ describe('AnthropicLLMClient', () => {
     expect(params.messages[0]).toEqual({ role: 'user', content: [{ type: 'text', text: 'hello' }] });
     expect(params.messages[1].content[0]).toMatchObject({ type: 'tool_use', id: 'tc1' });
     expect(params.messages[2].content[0]).toMatchObject({ type: 'tool_result', tool_use_id: 'tc1' });
+  });
+});
+
+describe('AnthropicLLMClient baseURL', () => {
+  const AnthropicMock = vi.mocked(Anthropic);
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.env.ANTHROPIC_API_KEY = 'sk-test-key';
+  });
+
+  afterEach(() => {
+    delete process.env.ANTHROPIC_BASE_URL;
+  });
+
+  it('passes baseURL when ANTHROPIC_BASE_URL is set', () => {
+    process.env.ANTHROPIC_BASE_URL = 'http://127.0.0.1:9999';
+    new AnthropicLLMClient(config);
+    expect(AnthropicMock).toHaveBeenCalledWith(
+      expect.objectContaining({ apiKey: 'sk-test-key', baseURL: 'http://127.0.0.1:9999' }),
+    );
+  });
+
+  it('omits baseURL when ANTHROPIC_BASE_URL is not set', () => {
+    new AnthropicLLMClient(config);
+    const call = AnthropicMock.mock.calls[0][0] as Record<string, unknown>;
+    expect(call.apiKey).toBe('sk-test-key');
+    expect(call.baseURL).toBeUndefined();
   });
 });

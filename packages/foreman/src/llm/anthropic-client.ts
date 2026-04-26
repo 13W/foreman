@@ -32,7 +32,8 @@ export class AnthropicLLMClient implements LLMClient {
     if (!apiKey) {
       throw new Error(`API key env var "${config.llm.api_key_env}" is not set`);
     }
-    this._sdk = new Anthropic({ apiKey });
+    const baseURL = process.env.ANTHROPIC_BASE_URL;
+    this._sdk = new Anthropic({ apiKey, ...(baseURL ? { baseURL } : {}) });
     this._model = config.llm.model;
     this._maxTokens = config.llm.max_tokens_per_turn;
   }
