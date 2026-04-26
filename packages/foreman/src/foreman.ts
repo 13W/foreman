@@ -3,15 +3,22 @@ import type { ForemanConfig } from './config.js';
 import { createLogger } from './logger.js';
 import { DefaultACPAgentServer } from './acp/server.js';
 import { DefaultA2AClient } from './a2a/client.js';
-import { WorkerCatalog } from './workers/catalog.js';
+import { WorkerCatalog, toToolName } from './workers/catalog.js';
 import type { WorkerCatalogEntry } from './workers/catalog.js';
 import { DispatchManager } from './workers/dispatch-manager.js';
 import type { DispatchHandle } from './workers/task-handle.js';
+import {
+  isPermissionEvent,
+  extractPermissionRequest,
+  extractStatusResult,
+  extractArtifactText,
+  extractMessageText,
+} from './workers/stream-helpers.js';
 import { AnthropicLLMClient } from './llm/anthropic-client.js';
 import { LLMLoop } from './llm/loop.js';
 import { ToolRegistry } from './llm/tool-registry.js';
 import { buildForemanSystemPrompt } from './llm/prompts.js';
-import { Plan, TaskResult } from '@foreman-stack/shared';
+import { Plan } from '@foreman-stack/shared';
 import type {
   Plan as PlanType,
   PermissionRequest,
@@ -20,7 +27,8 @@ import type {
   TaskResult as TaskResultType,
 } from '@foreman-stack/shared';
 import { mapPermissionOptionToDecision } from './permissions/mapper.js';
-import { PlanAbortedError } from './plan/errors.js';
+import { PlanAbortedError, PlanExecutor } from './plan/index.js';
+import { SessionState } from './session/state.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -31,14 +39,6 @@ function extractTextFromContent(content: ContentBlock[]): string {
     .filter((b) => b.type === 'text')
     .map((b) => (b as { type: 'text'; text: string }).text)
     .join('\n');
-}
-
-function toToolName(worker: WorkerCatalogEntry): string {
-  const raw = worker.agent_card?.name ?? worker.name_hint ?? new URL(worker.url).hostname;
-  return raw
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '_')
-    .replace(/^_+|_+$/g, '');
 }
 
 function buildWorkerDescription(worker: WorkerCatalogEntry): string {
@@ -54,62 +54,6 @@ function buildWorkerDescription(worker: WorkerCatalogEntry): string {
 function buildWorkerList(workers: WorkerCatalogEntry[]): string {
   if (workers.length === 0) return '(none)';
   return workers.map((w) => `- ${toToolName(w)}: ${buildWorkerDescription(w)}`).join('\n');
-}
-
-function isPermissionRequestPart(part: unknown): boolean {
-  const p = part as Record<string, unknown> | null | undefined;
-  if (!p || p['kind'] !== 'data') return false;
-  const data = p['data'] as Record<string, unknown> | null | undefined;
-  return (
-    !!data &&
-    typeof data['type'] === 'string' &&
-    ['fs.read', 'fs.write', 'terminal.create'].includes(data['type'])
-  );
-}
-
-function isPermissionEvent(event: StreamEvent): boolean {
-  if (event.type === 'message') {
-    const data = event.data as Record<string, unknown> | null | undefined;
-    const parts = data?.['parts'];
-    if (!Array.isArray(parts)) return false;
-    return parts.some(isPermissionRequestPart);
-  }
-  if (event.type === 'status') {
-    const data = event.data as Record<string, unknown> | null | undefined;
-    if (data?.['state'] !== 'input-required') return false;
-    const message = data['message'] as Record<string, unknown> | null | undefined;
-    const parts = message?.['parts'];
-    if (!Array.isArray(parts)) return false;
-    return parts.some(isPermissionRequestPart);
-  }
-  return false;
-}
-
-function extractPermissionRequest(event: StreamEvent): PermissionRequest | null {
-  let parts: unknown[];
-  if (event.type === 'message') {
-    const data = event.data as Record<string, unknown> | null | undefined;
-    parts = (data?.['parts'] as unknown[]) ?? [];
-  } else if (event.type === 'status') {
-    const data = event.data as Record<string, unknown> | null | undefined;
-    const message = data?.['message'] as Record<string, unknown> | null | undefined;
-    parts = (message?.['parts'] as unknown[]) ?? [];
-  } else {
-    return null;
-  }
-  for (const part of parts) {
-    if (isPermissionRequestPart(part)) {
-      const p = part as Record<string, unknown>;
-      const d = p['data'] as Record<string, unknown>;
-      return {
-        type: d['type'] as PermissionRequest['type'],
-        path: d['path'] as string | undefined,
-        command: d['command'] as string | undefined,
-        message: (d['message'] as string | undefined) ?? '',
-      };
-    }
-  }
-  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -293,10 +237,25 @@ export class Foreman {
     }
 
     if (capturedPlan) {
+      const ephemeralState = new SessionState(sessionId, process.cwd());
+      const executor = new PlanExecutor({
+        dispatchManager: this.dispatchManager,
+        catalog: this.catalog,
+        sessionState: ephemeralState,
+        config: this.config,
+        logger: this.logger,
+        // TODO(t4.7-full): Route escalations to plan owner first; for now, escalate directly to user.
+        onWorkerEscalation: async (taskId, request) => {
+          await this._handleWorkerEscalation(taskId, request, sessionId);
+        },
+      });
+
       let results: string[];
       try {
-        // TODO(t4.5): PlanExecutor will replace this serial loop with parallel batch dispatch and proper failure handling.
-        results = await this._executePlan(capturedPlan, userText, sessionId);
+        const { subtaskResults } = await executor.execute(capturedPlan, userText);
+        results = subtaskResults.map(
+          ({ subtaskId, result }) => `[${subtaskId}] ${JSON.stringify(result)}`,
+        );
       } catch (err) {
         let failureInfo: string;
         if (err instanceof PlanAbortedError) {
@@ -315,67 +274,6 @@ export class Foreman {
     } else if (finalText) {
       await this.acpServer.sendUpdate(sessionId, [{ type: 'text', text: finalText }]);
     }
-  }
-
-  // ---------------------------------------------------------------------------
-  // Plan execution (serial dispatch, iteration 1)
-  // ---------------------------------------------------------------------------
-
-  // TODO(t4.5): PlanExecutor will replace this serial loop with parallel batch dispatch and proper failure handling.
-  private async _executePlan(
-    plan: PlanType,
-    originatorIntent: string,
-    sessionId: string,
-  ): Promise<string[]> {
-    const results: string[] = [];
-
-    for (const batch of plan.batches) {
-      for (const subtask of batch.subtasks) {
-        const workerEntry = this.catalog
-          .getAvailable()
-          .find(
-            (w) =>
-              toToolName(w) === subtask.assigned_agent ||
-              w.agent_card?.name === subtask.assigned_agent ||
-              w.url === subtask.assigned_agent,
-          );
-
-        if (!workerEntry) {
-          throw new Error(
-            `No available worker for subtask "${subtask.id}" (assigned_agent: ${subtask.assigned_agent})`,
-          );
-        }
-
-        const payload: TaskPayload = {
-          description: subtask.description,
-          expected_output: subtask.expected_output,
-          inputs: subtask.inputs,
-          originator_intent: originatorIntent,
-          max_delegation_depth: 2,
-          parent_task_id: null,
-          base_branch: null,
-          timeout_sec: this.config.runtime.default_task_timeout_sec,
-          injected_mcps: [],
-        };
-
-        const taskResult = await this._runWorkerTask(workerEntry.url, payload, sessionId, undefined);
-
-        if (taskResult.status !== 'completed') {
-          // Cancel remaining sibling handles before aborting.
-          for (const [id, handle] of this._activeHandles) {
-            await handle.cancel().catch((err: unknown) => {
-              this.logger.warn({ taskId: id, err: String(err) }, 'sibling cancel failed');
-            });
-          }
-          this._activeHandles.clear();
-          throw new PlanAbortedError(subtask.id, taskResult);
-        }
-
-        results.push(`[${subtask.id}] ${JSON.stringify(taskResult)}`);
-      }
-    }
-
-    return results;
   }
 
   // ---------------------------------------------------------------------------
@@ -504,53 +402,4 @@ export class Foreman {
     }
     this._activeHandles.clear();
   }
-}
-
-// ---------------------------------------------------------------------------
-// Event content extraction helpers
-// ---------------------------------------------------------------------------
-
-function extractArtifactText(event: StreamEvent): string {
-  const data = event.data as Record<string, unknown> | null | undefined;
-  const parts = (data?.['parts'] as unknown[]) ?? [];
-  const chunks: string[] = [];
-  for (const part of parts) {
-    const p = part as Record<string, unknown> | null | undefined;
-    if (!p) continue;
-    if (p['kind'] === 'text') {
-      chunks.push(String(p['text'] ?? ''));
-    } else if (p['kind'] === 'data') {
-      chunks.push(JSON.stringify(p['data']));
-    }
-  }
-  return chunks.join('');
-}
-
-function extractStatusResult(event: StreamEvent): TaskResultType | null {
-  const data = event.data as Record<string, unknown> | null | undefined;
-  if (!data?.['final']) return null;
-  const message = data['message'] as Record<string, unknown> | null | undefined;
-  if (!message) return null;
-  const parts = (message['parts'] as unknown[]) ?? [];
-  for (const part of parts) {
-    const p = part as Record<string, unknown> | null | undefined;
-    if (p?.['kind'] === 'data' && p['data']) {
-      const parsed = TaskResult.safeParse(p['data']);
-      if (parsed.success) return parsed.data;
-    }
-  }
-  return null;
-}
-
-function extractMessageText(event: StreamEvent): string {
-  const data = event.data as Record<string, unknown> | null | undefined;
-  const parts = (data?.['parts'] as unknown[]) ?? [];
-  const chunks: string[] = [];
-  for (const part of parts) {
-    const p = part as Record<string, unknown> | null | undefined;
-    if (p?.['kind'] === 'text' && !isPermissionRequestPart(p)) {
-      chunks.push(String(p['text'] ?? ''));
-    }
-  }
-  return chunks.join('');
 }
