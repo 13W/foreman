@@ -30,7 +30,7 @@ All tests should pass.
 
 Foreman Stack consists of several moving parts:
 
-- **Foreman**: The "proраб" (orchestrator). It talks to you via ACP and manages the execution of tasks.
+- **Foreman**: The orchestrator. It talks to you via ACP and manages the execution of tasks.
 - **Proxy**: A protocol adapter that wraps a standard ACP agent (like Claude Code) and makes it available to the Foreman over the A2A protocol.
 - **Planner**: A specialized agent that takes your goal and breaks it down into a structured plan of subtasks.
 - **Workers**: The agents that perform the actual work in isolated Git worktrees.
