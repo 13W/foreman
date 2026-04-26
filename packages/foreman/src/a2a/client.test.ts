@@ -354,3 +354,48 @@ describe('respondToPermission', () => {
     ).rejects.toBeInstanceOf(TaskNotFoundError);
   });
 });
+
+// ---------------------------------------------------------------------------
+// sendFollowUp
+// ---------------------------------------------------------------------------
+
+describe('sendFollowUp', () => {
+  const taskId = 'task-followup-1';
+  const contextId = 'ctx-followup-1';
+  const taskEvent = { kind: 'task', id: taskId, contextId, status: { state: 'input-required' } };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockCreateFromUrl.mockResolvedValue(mockClient);
+    mockSendMessageStream.mockReturnValue(fakeStream([taskEvent]));
+    mockSendMessage.mockResolvedValue({ kind: 'task', id: taskId, contextId, status: { state: 'working' } });
+  });
+
+  it('sends sendMessage with correct contextId and provided parts', async () => {
+    const client = new DefaultA2AClient();
+    await client.dispatchTask(agentUrl, basePayload);
+    await client.sendFollowUp(taskId, [{ kind: 'text', text: 'should I continue?' }]);
+
+    expect(mockSendMessage).toHaveBeenCalledTimes(1);
+    const [params] = mockSendMessage.mock.calls[0];
+    expect(params.message.contextId).toBe(contextId);
+    expect(params.message.parts).toEqual([{ kind: 'text', text: 'should I continue?' }]);
+  });
+
+  it('sends data parts verbatim', async () => {
+    const client = new DefaultA2AClient();
+    await client.dispatchTask(agentUrl, basePayload);
+    const decision = { kind: 'allow_once' };
+    await client.sendFollowUp(taskId, [{ kind: 'data', data: decision }]);
+
+    const [params] = mockSendMessage.mock.calls[0];
+    expect(params.message.parts[0]).toMatchObject({ kind: 'data', data: decision });
+  });
+
+  it('throws TaskNotFoundError for unknown taskId', async () => {
+    const client = new DefaultA2AClient();
+    await expect(
+      client.sendFollowUp('not-registered', [{ kind: 'text', text: 'hello' }]),
+    ).rejects.toBeInstanceOf(TaskNotFoundError);
+  });
+});

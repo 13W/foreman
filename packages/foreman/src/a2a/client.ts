@@ -118,6 +118,10 @@ export class DefaultA2AClient implements A2AClient {
   }
 
   async respondToPermission(taskId: string, decision: PermissionDecision): Promise<void> {
+    await this.sendFollowUp(taskId, [{ kind: 'data', data: decision }]);
+  }
+
+  async sendFollowUp(taskId: string, parts: unknown[]): Promise<void> {
     const entry = this._requireTaskEntry(taskId);
     await entry.client.sendMessage({
       message: {
@@ -125,7 +129,8 @@ export class DefaultA2AClient implements A2AClient {
         messageId: randomUUID(),
         contextId: entry.contextId,
         role: 'user',
-        parts: [{ kind: 'data', data: decision }],
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        parts: parts as any,
       },
     });
   }

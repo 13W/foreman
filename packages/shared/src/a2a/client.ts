@@ -38,4 +38,11 @@ export interface A2AClient {
    * Implemented via SDK sendMessage with the task's contextId (A2A v0.3 convention).
    */
   respondToPermission(taskId: string, decision: PermissionDecision): Promise<void>;
+
+  /**
+   * Send a follow-up message on an existing task (same contextId).
+   * Used for multi-turn exchanges on tasks in input-required state.
+   * `parts` are A2A message parts, e.g. [{kind:'text',text:'...'} or {kind:'data',data:{...}}].
+   */
+  sendFollowUp(taskId: string, parts: unknown[]): Promise<void>;
 }

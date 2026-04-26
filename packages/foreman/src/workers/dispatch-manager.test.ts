@@ -18,6 +18,7 @@ const mockClient: A2AClient = {
   pollTask: mockPollTask,
   cancelTask: mockCancelTask,
   respondToPermission: vi.fn(),
+  sendFollowUp: vi.fn(),
 };
 
 // ---------------------------------------------------------------------------
