@@ -1,7 +1,23 @@
 {
   "name": "@foreman-stack/foreman",
-  "version": "0.0.1",
+  "version": "0.1.0",
+  "description": "Multi-session ACP server that decomposes user tasks and dispatches to A2A workers.",
   "type": "module",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/13W/foreman.git",
+    "directory": "packages/foreman"
+  },
+  "homepage": "https://github.com/13W/foreman#readme",
+  "bugs": {
+    "url": "https://github.com/13W/foreman/issues"
+  },
+  "keywords": [
+    "orchestrator",
+    "multi-agent",
+    "acp"
+  ],
   "engines": {
     "node": ">=24.0.0"
   },

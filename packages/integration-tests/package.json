@@ -1,8 +1,19 @@
 {
   "name": "@foreman-stack/integration-tests",
-  "version": "0.0.1",
+  "version": "0.1.0",
+  "description": "End-to-end integration tests for the Foreman Stack.",
   "type": "module",
   "private": true,
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/13W/foreman.git",
+    "directory": "packages/integration-tests"
+  },
+  "homepage": "https://github.com/13W/foreman#readme",
+  "bugs": {
+    "url": "https://github.com/13W/foreman/issues"
+  },
   "engines": {
     "node": ">=24.0.0"
   },

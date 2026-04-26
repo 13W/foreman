@@ -1,7 +1,24 @@
 {
   "name": "@foreman-stack/proxy",
-  "version": "0.0.1",
+  "version": "0.1.0",
+  "description": "ACP↔A2A protocol bridge for wrapping ACP agents as A2A workers.",
   "type": "module",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/13W/foreman.git",
+    "directory": "packages/proxy"
+  },
+  "homepage": "https://github.com/13W/foreman#readme",
+  "bugs": {
+    "url": "https://github.com/13W/foreman/issues"
+  },
+  "keywords": [
+    "acp",
+    "a2a",
+    "proxy",
+    "agent-protocol"
+  ],
   "engines": {
     "node": ">=24.0.0"
   },

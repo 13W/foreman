@@ -1,8 +1,18 @@
 {
   "name": "foreman-stack",
-  "version": "0.0.1",
+  "version": "0.1.0",
+  "description": "Orchestration system for parallel AI agents using ACP and A2A protocols.",
   "private": true,
   "type": "module",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/13W/foreman.git"
+  },
+  "homepage": "https://github.com/13W/foreman#readme",
+  "bugs": {
+    "url": "https://github.com/13W/foreman/issues"
+  },
   "packageManager": "pnpm@10.33.2",
   "engines": {
     "node": ">=24.0.0"
@@ -16,6 +26,7 @@
     "format:check": "prettier --check packages/*/src"
   },
   "devDependencies": {
+    "@changesets/cli": "^2.31.0",
     "@eslint/js": "^9.0.0",
     "@types/express": "^4.17.0",
     "@types/node": "^24.0.0",

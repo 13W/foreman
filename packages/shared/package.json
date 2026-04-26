@@ -1,7 +1,23 @@
 {
   "name": "@foreman-stack/shared",
-  "version": "0.0.1",
+  "version": "0.1.0",
+  "description": "Common schemas, types, and protocol utilities for the Foreman Stack.",
   "type": "module",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/13W/foreman.git",
+    "directory": "packages/shared"
+  },
+  "homepage": "https://github.com/13W/foreman#readme",
+  "bugs": {
+    "url": "https://github.com/13W/foreman/issues"
+  },
+  "keywords": [
+    "acp",
+    "a2a",
+    "shared-types"
+  ],
   "engines": {
     "node": ">=24.0.0"
   },
