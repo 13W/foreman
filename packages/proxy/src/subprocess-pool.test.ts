@@ -21,6 +21,7 @@ function makeConfig(
     },
     role: { description: 'test', skills: [] },
     mcps: { personal: [] },
+    permissions: { terminal_whitelist: [], permission_timeout_sec: 300 },
     worktrees: {
       base_dir: '/tmp/test-worktrees',
       branch_prefix: 'foreman/task-',
@@ -66,10 +67,6 @@ function makeClientManager(): ACPClientManager {
     ),
     sendPrompt: vi.fn(),
     cancelSession: vi.fn().mockResolvedValue(undefined),
-    onPermissionRequest: vi.fn(),
-    onFsRead: vi.fn(),
-    onFsWrite: vi.fn(),
-    onTerminalCreate: vi.fn(),
   };
 }
 

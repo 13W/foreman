@@ -215,6 +215,7 @@ export class MockAnthropicServer {
 
       // 4. content_block_stop
       this._writeSSE(res, 'content_block_stop', {
+        type: 'content_block_stop',
         index: 0
       });
 

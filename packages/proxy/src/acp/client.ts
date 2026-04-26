@@ -158,8 +158,12 @@ export class DefaultACPClientManager implements ACPClientManager {
     const connection = new ClientSideConnection(
       (_agent): Client => ({
         async sessionUpdate(params) {
+          logger.debug({ sessionId: params.sessionId }, 'ACP sessionUpdate received');
           const queue = self.sessionQueues.get(params.sessionId);
-          if (!queue) return;
+          if (!queue) {
+            logger.warn({ sessionId: params.sessionId }, 'ACP sessionUpdate received for unknown session');
+            return;
+          }
           const update = params.update as SessionUpdate;
 
           if (update.sessionUpdate === 'agent_message_chunk') {

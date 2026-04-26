@@ -5,6 +5,8 @@ import { loadConfig, DEFAULT_CONFIG_PATH } from './config.js';
 import { PlannerServer } from './server.js';
 import { SessionManager } from './session.js';
 import { AnthropicStrategy } from './strategy.anthropic.js';
+import { StubStrategy } from './strategy.stub.js';
+import { Strategy } from './strategy.js';
 
 const { values } = parseArgs({
   options: {
@@ -48,7 +50,12 @@ logger.info(
   'Starting foreman-planner',
 );
 
-const strategy = new AnthropicStrategy(config, logger);
+let strategy: Strategy;
+if (config.planner.strategy === 'stub') {
+  strategy = new StubStrategy();
+} else {
+  strategy = new AnthropicStrategy(config, logger);
+}
 const sessionManager = new SessionManager(strategy);
 const server = new PlannerServer(config, sessionManager, logger);
 

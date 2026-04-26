@@ -17,6 +17,7 @@ function makeConfig(overrides?: Partial<ProxyConfig['worktrees']>): ProxyConfig 
     },
     role: { description: 'test', skills: [] },
     mcps: { personal: [] },
+    permissions: { terminal_whitelist: [], permission_timeout_sec: 300 },
     worktrees: {
       base_dir: '/tmp/test-worktrees',
       branch_prefix: 'foreman/task-',

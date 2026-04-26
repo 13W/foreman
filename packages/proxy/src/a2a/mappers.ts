@@ -77,7 +77,19 @@ export function buildSystemPrompt(config: ProxyConfig, payload: TaskPayload): Co
 export function mapPromptEventToStreamEvent(event: PromptEvent): StreamEvent | null {
   switch (event.kind) {
     case 'agent_message_chunk':
-      return { type: 'message', taskId: '', data: { content: event.content } };
+      return {
+        type: 'message',
+        taskId: '',
+        data: {
+          kind: 'message',
+          parts: [
+            {
+              kind: 'text',
+              text: event.content.type === 'text' ? event.content.text : '',
+            },
+          ],
+        },
+      };
     case 'tool_call':
       return {
         type: 'status',

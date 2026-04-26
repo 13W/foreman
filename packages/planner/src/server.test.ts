@@ -21,6 +21,8 @@ describe('PlannerServer Smoke Test', () => {
   beforeAll(async () => {
     configPath = join(tmpdir(), `planner-test-config-${Date.now()}.yaml`);
     const configContent = `
+planner:
+  strategy: "stub"
 llm:
   model: "test-model"
 logging:

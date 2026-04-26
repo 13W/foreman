@@ -192,6 +192,7 @@ export class Foreman {
     for (const worker of available) {
       const toolName = toToolName(worker);
       const isPlanner = this.catalog.isPlanner(worker);
+      this.logger.debug({ toolName, isPlanner }, 'Registering worker tool');
 
       registry.register(
         toolName,

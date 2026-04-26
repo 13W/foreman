@@ -195,9 +195,9 @@ describe('parseTaskPayload', () => {
 // --- mapDecisionToAcpResponse ---
 describe('mapDecisionToAcpResponse', () => {
   const options = [
-    { optionId: 'o1', kind: 'allow_once', title: 'Allow once', description: '' },
-    { optionId: 'o2', kind: 'reject_once', title: 'Reject once', description: '' },
-  ];
+    { optionId: 'o1', kind: 'allow_once', title: 'Allow once', description: '', name: 'Allow once' },
+    { optionId: 'o2', kind: 'reject_once', title: 'Reject once', description: '', name: 'Reject once' },
+  ] as any;
 
   it('cancelled → { outcome: { outcome: cancelled } }', () => {
     const r = mapDecisionToAcpResponse({ kind: 'cancelled' }, options);

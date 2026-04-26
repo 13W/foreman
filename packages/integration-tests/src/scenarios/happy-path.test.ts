@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { spawnProxy, spawnForeman, TestACPClient, cleanupAll } from '../harness/index.js';
+import { spawnProxy, spawnForeman, TestACPClient, cleanupAll, MockAnthropicServer } from '../harness/index.js';
 import { join } from 'node:path';
 
 describe('Happy Path Scenario', () => {
@@ -7,14 +7,43 @@ describe('Happy Path Scenario', () => {
     await cleanupAll();
   });
 
-  it.skip('should execute a full end-to-end refactoring plan', async () => {
-    // 1. Setup fixture scripts paths
+  it('should execute a full end-to-end refactoring plan', async () => {
+    // 1. Setup Mock Anthropic Server with scripted responses
+    const mockAnthropic = new MockAnthropicServer([
+      // Turn 1: Initial prompt with tools
+      {
+        matcher: (req) => req.messages.length === 1 && !!req.tools && req.tools.length > 0,
+        response: {
+          kind: 'tool_use',
+          toolName: 'planner',
+          toolInput: { description: 'Decompose: refactor auth module and add tests' },
+        },
+      },
+      // Turn 2: Follow-up after tool result
+      {
+        matcher: (req) => req.messages.length > 1,
+        response: {
+          kind: 'text',
+          text: 'Successfully refactored the auth module and added tests.',
+        },
+      },
+      // Synthesis: Fresh call with no tools
+      {
+        matcher: () => true,
+        response: {
+          kind: 'text',
+          text: 'Successfully refactored the auth module and added tests.',
+        },
+      },
+    ]);
+
+    // 2. Setup fixture scripts paths
     const fixturesDir = join(import.meta.dirname, '..', 'fixtures', 'scripts');
     const plannerScript = join(fixturesDir, 'planner-success.json');
     const coderScript = join(fixturesDir, 'coder-success.json');
     const testerScript = join(fixturesDir, 'tester-success.json');
 
-    // 2. Spawn 3 workers
+    // 3. Spawn 3 workers
     // Planner worker needs the task_decomposition skill
     const { url: plannerUrl } = await spawnProxy({
       name: 'planner',
@@ -40,35 +69,27 @@ describe('Happy Path Scenario', () => {
       description: 'A test automation expert.'
     });
 
-    // 3. Spawn foreman pointing to all 3
+    // 4. Spawn foreman pointing to all 3 and using the mock LLM
     const { child: foremanProcess, tempDir: foremanDir } = await spawnForeman({
       workers: [
         { url: plannerUrl, name_hint: 'planner' },
         { url: coderUrl, name_hint: 'coder' },
         { url: testerUrl, name_hint: 'tester' },
       ],
+      mockAnthropic,
     });
 
-    // 4. Connect with ACP client
+    // 5. Connect with ACP client
     const client = new TestACPClient(foremanProcess);
 
-    // 5. Initialize and session/new
+    // 6. Initialize and session/new
     await client.initialize();
     const { sessionId } = await client.newSession(foremanDir);
 
-    // 6. Send the high-level prompt
-    // TODO: This currently fails because Foreman attempts real Anthropic API calls.
-    // Blocker: Foreman's AnthropicLLMClient needs baseURL support to point to a mock server,
-    // or a fake backend mode.
-    const promptPromise = client.prompt(sessionId, 'Refactor the auth module and add tests');
+    // 7. Send the high-level prompt
+    const result = await client.prompt(sessionId, 'Refactor the auth module and add tests');
 
-    // For now, we expect this to fail or timeout due to the LLM blocker.
-    // Once the blocker is resolved (via mock server or fake backend), the assertions below can be enabled.
-    
-    const result = await promptPromise;
-
-    // --- ASSERTIONS (Enable after LLM blocker is resolved) ---
-    
+    // 8. Assertions
     expect(result.stopReason).toBe('end_turn');
 
     // Verify synthesis was received (last update)
@@ -77,12 +98,11 @@ describe('Happy Path Scenario', () => {
     const lastUpdate = updates[updates.length - 1];
     expect(lastUpdate.sessionUpdate).toBe('agent_message_chunk');
     
-    // We can't assert exact text because it's LLM-generated, but it should exist
     if (lastUpdate.sessionUpdate === 'agent_message_chunk' && lastUpdate.content.type === 'text') {
-      expect(lastUpdate.content.text).toBeTruthy();
+      expect(lastUpdate.content.text).toBe('Successfully refactored the auth module and added tests.');
     }
 
-    // Optional: verify that each worker was actually reached.
-    // This could be done by checking foreman logs or proxy logs if we capture them.
+    // Verify mock server saw at least 2 calls (Planning and synthesis)
+    expect(mockAnthropic.getRequestLog().length).toBeGreaterThanOrEqual(2);
   }, 60000); // 60s timeout for full scenario
 });

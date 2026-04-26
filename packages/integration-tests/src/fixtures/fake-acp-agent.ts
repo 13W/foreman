@@ -3,6 +3,7 @@ import { AgentSideConnection, ndJsonStream, StopReason, Agent } from '@agentclie
 import { Readable, Writable } from 'node:stream';
 
 const scriptPath = process.argv[2];
+console.error(`[FakeAgent] Starting with script: ${scriptPath}`);
 if (!scriptPath) {
   console.error('Usage: node fake-acp-agent.js <script-path>');
   process.exit(1);
@@ -37,6 +38,7 @@ const agent: Agent = {
 
   async prompt(params) {
     const sessionId = params.sessionId;
+    console.error(`[FakeAgent] Prompt received for session: ${sessionId}`);
     const promptIndex = sessionPrompts.get(sessionId) || 0;
     sessionPrompts.set(sessionId, promptIndex + 1);
 
@@ -52,13 +54,20 @@ const agent: Agent = {
     for (const action of actions) {
       switch (action.type) {
         case 'agent_message_chunk':
-          await agentConn?.sessionUpdate({
-            sessionId,
-            update: {
-              sessionUpdate: 'agent_message_chunk',
-              content: { type: 'text', text: action.text },
-            },
-          });
+          if (!agentConn) {
+            console.error('[FakeAgent] Cannot send update: agentConn is null');
+          } else {
+            console.error(`[FakeAgent] Sending update for session ${sessionId}`);
+            await agentConn.sessionUpdate({
+              sessionId,
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: action.text },
+              },
+            });
+            // Small delay to ensure stream flushing
+            await new Promise((r) => setTimeout(r, 100));
+          }
           break;
         case 'permission_request':
           await agentConn?.requestPermission({

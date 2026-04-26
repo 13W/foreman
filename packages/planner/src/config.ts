@@ -9,8 +9,9 @@ export const PlannerConfigSchema = z.object({
     .object({
       name: z.string().default('foreman-planner'),
       version: z.string().default('0.1.0'),
+      strategy: z.enum(['anthropic', 'stub']).default('anthropic'),
     })
-    .default({ name: 'foreman-planner', version: '0.1.0' }),
+    .default({ name: 'foreman-planner', version: '0.1.0', strategy: 'anthropic' }),
   llm: z.object({
     model: z.string(),
     api_key_env: z.string().default('ANTHROPIC_API_KEY'),

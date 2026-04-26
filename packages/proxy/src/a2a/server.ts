@@ -39,7 +39,7 @@ export class DefaultA2AServer implements A2AServer {
     // Mount agent card at the SDK-defined path
     this.app.use(`/${AGENT_CARD_PATH}`, agentCardHandler({ agentCardProvider: requestHandler }));
     this.app.use(
-      '/a2a/jsonrpc',
+      '/',
       jsonRpcHandler({ requestHandler, userBuilder: UserBuilder.noAuthentication }),
     );
   }

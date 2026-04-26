@@ -53,7 +53,7 @@ export class AnthropicStrategy implements Strategy {
       {
         name: 'submit_plan',
         description: 'Submit a validated plan for the requested task',
-        input_schema: zodToJsonSchema(Plan) as any,
+        input_schema: zodToJsonSchema(Plan as any) as any,
       },
     ];
 

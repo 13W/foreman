@@ -65,8 +65,8 @@ export class WorkerCatalog {
     try {
       agent_card = await Promise.race([this._client.fetchAgentCard(url), timeout]);
       status = 'available';
-    } catch {
-      rootLogger.warn({ url }, 'worker unreachable during discovery');
+    } catch (err) {
+      rootLogger.warn({ url, err: err instanceof Error ? err.message : String(err) }, 'worker unreachable during discovery');
     } finally {
       clearTimeout(timeoutId);
     }

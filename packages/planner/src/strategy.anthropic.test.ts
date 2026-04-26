@@ -20,7 +20,7 @@ vi.mock('@anthropic-ai/sdk', () => {
 describe('AnthropicStrategy', () => {
   const logger = pino({ level: 'silent' });
   const config: PlannerConfig = {
-    planner: { name: 'test-planner', version: '0.1.0' },
+    planner: { name: 'test-planner', version: '0.1.0', strategy: 'anthropic' },
     llm: {
       model: 'claude-3-5-sonnet-20240620',
       api_key_env: 'ANTHROPIC_API_KEY',

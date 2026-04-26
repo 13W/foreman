@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ProxyAgentExecutor } from './executor.js';
 import type { TaskHandler } from '@foreman-stack/shared';
 import type { ExecutionEventBus, RequestContext } from '@a2a-js/sdk/server';
@@ -27,8 +27,13 @@ describe('ProxyAgentExecutor', () => {
   let taskHandler: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
+    process.env.A2A_RACE_DELAY_MS = '0';
     taskHandler = vi.fn().mockResolvedValue(undefined);
     executor = new ProxyAgentExecutor(taskHandler as unknown as TaskHandler, 'http://proxy:4000');
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   it('publishes working status on first execute', async () => {
@@ -36,6 +41,10 @@ describe('ProxyAgentExecutor', () => {
     const payload = { description: 'D', originator_intent: 'I', max_delegation_depth: 0 };
     const ctx = makeCtx('t1', [{ kind: 'data', data: payload }]);
     await executor.execute(ctx, bus);
+    
+    // Wait for the setTimeout(0)
+    await new Promise((r) => setTimeout(r, 10));
+    
     expect(bus.publish).toHaveBeenCalledWith(expect.objectContaining({ kind: 'status-update' }));
   });
 
@@ -44,8 +53,10 @@ describe('ProxyAgentExecutor', () => {
     const payload = { description: 'D', originator_intent: 'I', max_delegation_depth: 0 };
     const ctx = makeCtx('t2', [{ kind: 'data', data: payload }]);
     await executor.execute(ctx, bus);
-    // Give microtasks a tick
+    
+    // Wait for the setTimeout(0)
     await new Promise((r) => setTimeout(r, 10));
+    
     expect(taskHandler).toHaveBeenCalledWith(
       expect.objectContaining({ description: 'D' }),
       expect.objectContaining({ taskId: 't2' }),
@@ -71,7 +82,10 @@ describe('ProxyAgentExecutor', () => {
     });
 
     await executor.execute(ctx, bus);
-    await new Promise((r) => setTimeout(r, 20));
+    
+    // Wait for the setTimeout(0) and the taskHandler completion
+    await new Promise((r) => setTimeout(r, 50));
+    
     expect(completionCalled).toBe(true);
     // Verify a terminal status-update was published
     const calls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls;
@@ -92,6 +106,10 @@ describe('ProxyAgentExecutor', () => {
     });
 
     await executor.execute(ctx, bus);
+    
+    // Wait for the setTimeout(0)
+    await new Promise((r) => setTimeout(r, 20));
+    
     await executor.cancelTask('t4', bus);
     expect(cancelled).toBe(true);
   });
