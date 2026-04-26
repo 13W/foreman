@@ -67,9 +67,9 @@ node packages/foreman/dist/cli.js --config ./foreman.yaml
 ## Documentation
 
 - [**Getting started**](docs/getting-started.md) — Sequential tutorial from zero to running your first multi-agent task.
-- [Architecture deep dive](docs/architecture.md) — (Coming soon) Detailed breakdown of protocols and components.
-- [Configuration reference](docs/configuration.md) — (Coming soon) Exhaustive list of all configuration fields.
-- [Troubleshooting](docs/troubleshooting.md) — (Coming soon) Common issues and how to fix them.
+- [Architecture deep dive](docs/architecture.md) — Detailed breakdown of protocols and components.
+- [Configuration reference](docs/configuration.md) — Exhaustive list of all configuration fields.
+- [Troubleshooting](docs/troubleshooting.md) — Common issues and how to fix them.
 
 ## Repository layout
 
