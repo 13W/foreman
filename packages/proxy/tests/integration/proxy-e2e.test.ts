@@ -120,26 +120,10 @@ describe('ProxyServer e2e', () => {
 
     expect(events.length).toBeGreaterThan(0);
 
-    // Find the terminal status-update or a message containing the final result
-    const terminal = events.find((e: any) => {
-      // Direct status update
-      if (e?.result?.status?.state === 'completed' || e?.result?.status?.state === 'failed') {
-        return true;
-      }
-      // Result serialized in a message (iteration 1 convention)
-      if (e?.result?.kind === 'message') {
-        const dataPart = e.result.parts?.find((p: any) => p.kind === 'text');
-        if (dataPart) {
-          try {
-            const parsed = JSON.parse(dataPart.text);
-            return parsed.status === 'completed' || parsed.status === 'failed';
-          } catch {
-            return false;
-          }
-        }
-      }
-      return false;
-    });
+    // Find the terminal status-update
+    const terminal = events.find((e: any) =>
+      e?.result?.status?.state === 'completed' || e?.result?.status?.state === 'failed',
+    );
     expect(terminal).toBeTruthy();
   }, 20_000);
 });

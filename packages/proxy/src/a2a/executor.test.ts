@@ -27,7 +27,6 @@ describe('ProxyAgentExecutor', () => {
   let taskHandler: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
-    process.env.A2A_RACE_DELAY_MS = '0';
     taskHandler = vi.fn().mockResolvedValue(undefined);
     executor = new ProxyAgentExecutor(taskHandler as unknown as TaskHandler, 'http://proxy:4000');
   });
@@ -41,10 +40,6 @@ describe('ProxyAgentExecutor', () => {
     const payload = { description: 'D', originator_intent: 'I', max_delegation_depth: 0 };
     const ctx = makeCtx('t1', [{ kind: 'data', data: payload }]);
     await executor.execute(ctx, bus);
-    
-    // Wait for the setTimeout(0)
-    await new Promise((r) => setTimeout(r, 10));
-    
     expect(bus.publish).toHaveBeenCalledWith(expect.objectContaining({ kind: 'status-update' }));
   });
 
@@ -53,10 +48,6 @@ describe('ProxyAgentExecutor', () => {
     const payload = { description: 'D', originator_intent: 'I', max_delegation_depth: 0 };
     const ctx = makeCtx('t2', [{ kind: 'data', data: payload }]);
     await executor.execute(ctx, bus);
-    
-    // Wait for the setTimeout(0)
-    await new Promise((r) => setTimeout(r, 10));
-    
     expect(taskHandler).toHaveBeenCalledWith(
       expect.objectContaining({ description: 'D' }),
       expect.objectContaining({ taskId: 't2' }),
@@ -82,10 +73,6 @@ describe('ProxyAgentExecutor', () => {
     });
 
     await executor.execute(ctx, bus);
-    
-    // Wait for the setTimeout(0) and the taskHandler completion
-    await new Promise((r) => setTimeout(r, 50));
-    
     expect(completionCalled).toBe(true);
     // Verify a terminal status-update was published
     const calls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls;
@@ -106,10 +93,6 @@ describe('ProxyAgentExecutor', () => {
     });
 
     await executor.execute(ctx, bus);
-    
-    // Wait for the setTimeout(0)
-    await new Promise((r) => setTimeout(r, 20));
-    
     await executor.cancelTask('t4', bus);
     expect(cancelled).toBe(true);
   });

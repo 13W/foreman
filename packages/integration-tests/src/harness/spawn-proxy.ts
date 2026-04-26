@@ -85,7 +85,7 @@ export async function spawnProxy(opts: SpawnProxyOpts) {
   const child = spawn('node', [proxyBin, '--config', configPath], {
     cwd: tempDir,
     stdio: ['pipe', 'inherit', 'inherit'],
-    env: { ...process.env, A2A_RACE_DELAY_MS: '500' },
+    env: { ...process.env },
   });
 
   registerProcess(child);

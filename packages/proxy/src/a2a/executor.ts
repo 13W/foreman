@@ -101,40 +101,33 @@ export class ProxyAgentExecutor implements AgentExecutor {
       return;
     }
 
-    // Use a small delay for the first update and task start to avoid a
-    // race condition where the A2A client hasn't yet registered the taskId
-    // from our JSON-RPC response.
-    const delayMs = parseInt(process.env.A2A_RACE_DELAY_MS || '0', 10);
+    bus.publish({
+      kind: 'status-update',
+      taskId,
+      contextId: ctx.contextId,
+      status: { state: 'working' },
+      final: false,
+    });
 
-    setTimeout(() => {
-      bus.publish({
-        kind: 'status-update',
-        taskId,
-        contextId: ctx.contextId,
-        status: { state: 'working' },
-        final: false,
-      });
+    const handle: TaskHandle = { taskId, agentUrl: this.agentUrl };
 
-      const handle: TaskHandle = { taskId, agentUrl: this.agentUrl };
-
-      // Kick off task handler asynchronously so execute() can return the Task response immediately
-      this.taskHandler(payload, handle).catch((err) => {
-        logger.error({ err, taskId }, 'taskHandler rejected');
-        if (this.tasks.has(taskId)) {
-          this.completeTask(taskId, {
-            status: 'failed',
-            stop_reason: 'subprocess_crash',
-            summary: '',
-            branch_ref: '',
-            session_transcript_ref: '',
-            error: {
-              code: 'internal_error',
-              message: err instanceof Error ? err.message : String(err),
-            },
-          });
-        }
-      });
-    }, delayMs);
+    // Kick off task handler asynchronously so execute() can return the Task response immediately
+    this.taskHandler(payload, handle).catch((err) => {
+      logger.error({ err, taskId }, 'taskHandler rejected');
+      if (this.tasks.has(taskId)) {
+        this.completeTask(taskId, {
+          status: 'failed',
+          stop_reason: 'subprocess_crash',
+          summary: '',
+          branch_ref: '',
+          session_transcript_ref: '',
+          error: {
+            code: 'internal_error',
+            message: err instanceof Error ? err.message : String(err),
+          },
+        });
+      }
+    });
   }
 
   // -------------------------------------------------------------------------
@@ -188,16 +181,6 @@ export class ProxyAgentExecutor implements AgentExecutor {
   completeTask(taskId: string, result: TaskResult): void {
     const ctx = this.tasks.get(taskId);
     if (!ctx) return;
-
-    // Send the final result as a message first so Foreman can definitely see it
-    ctx.bus.publish({
-      kind: 'message',
-      taskId,
-      contextId: ctx.contextId,
-      messageId: randomUUID(),
-      parts: [{ kind: 'text', text: JSON.stringify(result) }],
-      role: 'agent',
-    } as any);
 
     const state =
       result.status === 'completed'
