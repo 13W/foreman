@@ -1,10 +1,11 @@
 import { ChildProcess } from 'node:child_process';
-import { ClientSideConnection, ndJsonStream, Client, SessionUpdate } from '@agentclientprotocol/sdk';
+import { ClientSideConnection, ndJsonStream, Client, SessionUpdate, PermissionRequestParams, PermissionRequestResponse } from '@agentclientprotocol/sdk';
 import { Readable, Writable } from 'node:stream';
 
 export class TestACPClient {
   public connection: ClientSideConnection;
   public updates: SessionUpdate[] = [];
+  public permissionRequests: PermissionRequestParams[] = [];
 
   constructor(child: ChildProcess) {
     const stream = ndJsonStream(
@@ -13,8 +14,22 @@ export class TestACPClient {
     );
 
     const clientStub: Client = {
-      requestPermission: async () => {
-        throw new Error('TestACPClient: requestPermission not implemented yet');
+      requestPermission: async (params: PermissionRequestParams): Promise<PermissionRequestResponse> => {
+        this.permissionRequests.push(params);
+        
+        // Take a default response strategy: pick the first option whose kind === 'allow_once'.
+        // If none, pick the first option.
+        const allowOnceOption = params.options.find(opt => opt.kind === 'allow_once');
+        const selectedOption = allowOnceOption || params.options[0];
+        
+        if (!selectedOption) {
+          throw new Error('TestACPClient: requestPermission received with no options');
+        }
+        
+        return {
+          outcome: 'selected',
+          optionId: selectedOption.id
+        };
       },
       sessionUpdate: async (params) => {
         this.updates.push(params.update);
