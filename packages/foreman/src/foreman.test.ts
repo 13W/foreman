@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Foreman } from './foreman.js';
 import { DispatchHandle } from './workers/task-handle.js';
@@ -17,7 +18,12 @@ vi.mock('./llm/anthropic-client.js', () => ({
 
 const minimalConfig = {
   foreman: { name: 'test-foreman', version: '0.0.1', working_dir: '/tmp' },
-  llm: { backend: 'anthropic' as const, model: 'claude-3-5-haiku-20241022', api_key_env: 'ANTHROPIC_API_KEY', max_tokens_per_turn: 8192 },
+  llm: {
+    backend: 'anthropic' as const,
+    model: 'claude-3-5-haiku-20241022',
+    api_key_env: 'ANTHROPIC_API_KEY',
+    max_tokens_per_turn: 8192,
+  },
   workers: [],
   mcps: { personal: [], injected: [] },
   runtime: {
@@ -69,6 +75,11 @@ function makeHandle(taskId: string, events: StreamEvent[], cancelFn = vi.fn()): 
   return new DispatchHandle(taskId, 'http://worker.test', gen(), cancelFn);
 }
 
+/** Access private members for testing without type errors. */
+function priv(instance: Foreman): any {
+  return instance as any;
+}
+
 // ---------------------------------------------------------------------------
 // _runWorkerTask tests
 // ---------------------------------------------------------------------------
@@ -84,9 +95,14 @@ describe('Foreman._runWorkerTask', () => {
   it('parses TaskResult from terminal status message', async () => {
     const expected = makeTaskResult({ summary: 'all good' });
     const handle = makeHandle('task-1', [makeStatusEvent('task-1', expected)]);
-    dispatchSpy = vi.spyOn((foreman as never)['dispatchManager'], 'dispatch').mockResolvedValue(handle);
+    dispatchSpy = vi.spyOn(priv(foreman).dispatchManager, 'dispatch').mockResolvedValue(handle);
 
-    const result = await (foreman as never)['_runWorkerTask']('http://worker.test', {} as TaskPayload, 'session-1', undefined);
+    const result = await priv(foreman)._runWorkerTask(
+      'http://worker.test',
+      {} as TaskPayload,
+      'session-1',
+      undefined,
+    );
 
     expect(result).toEqual(expected);
     dispatchSpy.mockRestore();
@@ -100,9 +116,14 @@ describe('Foreman._runWorkerTask', () => {
       timestamp: '',
     };
     const handle = makeHandle('task-2', [msgEvent]);
-    dispatchSpy = vi.spyOn((foreman as never)['dispatchManager'], 'dispatch').mockResolvedValue(handle);
+    dispatchSpy = vi.spyOn(priv(foreman).dispatchManager, 'dispatch').mockResolvedValue(handle);
 
-    const result = await (foreman as never)['_runWorkerTask']('http://worker.test', {} as TaskPayload, 'session-1', undefined);
+    const result = await priv(foreman)._runWorkerTask(
+      'http://worker.test',
+      {} as TaskPayload,
+      'session-1',
+      undefined,
+    );
 
     expect(result.status).toBe('completed');
     expect(result.summary).toContain('hello from worker');
@@ -120,9 +141,10 @@ describe('Foreman._executePlan', () => {
   const workerUrl = 'http://worker.test';
 
   const basePlan: Plan = {
-    schema_version: '1.0',
     plan_id: 'plan-1',
     originator_intent: 'test intent',
+    goal_summary: 'test goal',
+    source: 'external_planner',
     batches: [
       {
         batch_id: 'b1',
@@ -147,7 +169,7 @@ describe('Foreman._executePlan', () => {
   };
 
   function stubCatalogWorker(f: Foreman, url: string, name: string) {
-    vi.spyOn((f as never)['catalog'], 'getAvailable').mockReturnValue([
+    vi.spyOn(priv(f).catalog, 'getAvailable').mockReturnValue([
       {
         url,
         name_hint: name,
@@ -170,11 +192,11 @@ describe('Foreman._executePlan', () => {
     const h1 = makeHandle('t1', [makeStatusEvent('t1', r1)]);
     const h2 = makeHandle('t2', [makeStatusEvent('t2', r2)]);
 
-    const dispatch = vi.spyOn((foreman as never)['dispatchManager'], 'dispatch')
+    const dispatch = vi.spyOn(priv(foreman).dispatchManager, 'dispatch')
       .mockResolvedValueOnce(h1)
       .mockResolvedValueOnce(h2);
 
-    const results = await (foreman as never)['_executePlan'](basePlan, 'test intent', 'session-1');
+    const results = await priv(foreman)._executePlan(basePlan, 'test intent', 'session-1');
 
     expect(results).toHaveLength(2);
     expect(results[0]).toContain('sub-1');
@@ -182,22 +204,26 @@ describe('Foreman._executePlan', () => {
     dispatch.mockRestore();
   });
 
-  it('throws PlanAbortedError and cancels sibling handles when second subtask fails', async () => {
+  it('throws PlanAbortedError when second subtask fails', async () => {
     const r1 = makeTaskResult({ summary: 'sub1 done' });
-    const r2 = makeTaskResult({ status: 'failed', stop_reason: null, summary: '', branch_ref: '', session_transcript_ref: '', error: { code: 'ERR', message: 'boom' } });
+    const r2 = makeTaskResult({
+      status: 'failed',
+      stop_reason: null,
+      summary: '',
+      branch_ref: '',
+      session_transcript_ref: '',
+      error: { code: 'ERR', message: 'boom' },
+    });
 
-    const cancelSpy1 = vi.fn().mockResolvedValue(undefined);
-    const cancelSpy2 = vi.fn().mockResolvedValue(undefined);
+    const h1 = makeHandle('t1', [makeStatusEvent('t1', r1)]);
+    const h2 = makeHandle('t2', [makeStatusEvent('t2', r2)]);
 
-    const h1 = makeHandle('t1', [makeStatusEvent('t1', r1)], cancelSpy1);
-    const h2 = makeHandle('t2', [makeStatusEvent('t2', r2)], cancelSpy2);
-
-    const dispatch = vi.spyOn((foreman as never)['dispatchManager'], 'dispatch')
+    const dispatch = vi.spyOn(priv(foreman).dispatchManager, 'dispatch')
       .mockResolvedValueOnce(h1)
       .mockResolvedValueOnce(h2);
 
     await expect(
-      (foreman as never)['_executePlan'](basePlan, 'test intent', 'session-1'),
+      priv(foreman)._executePlan(basePlan, 'test intent', 'session-1'),
     ).rejects.toThrow(PlanAbortedError);
 
     dispatch.mockRestore();
@@ -220,12 +246,12 @@ describe('Foreman._executePlan', () => {
       batches: [{ batch_id: 'b1', subtasks: [basePlan.batches[0].subtasks[0]] }],
     };
 
-    const dispatch = vi.spyOn((foreman as never)['dispatchManager'], 'dispatch')
+    const dispatch = vi.spyOn(priv(foreman).dispatchManager, 'dispatch')
       .mockResolvedValueOnce(h1);
 
     let caught: PlanAbortedError | null = null;
     try {
-      await (foreman as never)['_executePlan'](singleSubtaskPlan, 'intent', 'session-1');
+      await priv(foreman)._executePlan(singleSubtaskPlan, 'intent', 'session-1');
     } catch (err) {
       caught = err as PlanAbortedError;
     }
