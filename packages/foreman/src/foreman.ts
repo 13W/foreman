@@ -11,14 +11,16 @@ import { AnthropicLLMClient } from './llm/anthropic-client.js';
 import { LLMLoop } from './llm/loop.js';
 import { ToolRegistry } from './llm/tool-registry.js';
 import { buildForemanSystemPrompt } from './llm/prompts.js';
-import { Plan } from '@foreman-stack/shared';
+import { Plan, TaskResult } from '@foreman-stack/shared';
 import type {
   Plan as PlanType,
   PermissionRequest,
   StreamEvent,
   TaskPayload,
+  TaskResult as TaskResultType,
 } from '@foreman-stack/shared';
 import { mapPermissionOptionToDecision } from './permissions/mapper.js';
+import { PlanAbortedError } from './plan/errors.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -228,21 +230,22 @@ export class Foreman {
             injected_mcps: [],
           };
 
-          const result = await this._runWorkerTask(worker.url, payload, sessionId, signal);
+          const taskResult = await this._runWorkerTask(worker.url, payload, sessionId, signal);
+          const resultStr = JSON.stringify(taskResult);
 
           if (isPlanner) {
             try {
-              const parsed = Plan.safeParse(JSON.parse(result));
+              const parsed = Plan.safeParse(JSON.parse(taskResult.summary));
               if (parsed.success) {
                 capturedPlan = parsed.data;
                 return 'Plan received. Executing subtasks.';
               }
             } catch {
-              // Not valid JSON plan — return raw result
+              // Not valid JSON plan — return raw result string
             }
           }
 
-          return result;
+          return resultStr;
         },
         { forceWrite: true },
       );
@@ -276,10 +279,17 @@ export class Foreman {
         // TODO(t4.5): PlanExecutor will replace this serial loop with parallel batch dispatch and proper failure handling.
         results = await this._executePlan(capturedPlan, userText, sessionId);
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        await this.acpServer.sendUpdate(sessionId, [
-          { type: 'text', text: `Plan execution failed: ${msg}` },
-        ]);
+        if (err instanceof PlanAbortedError) {
+          const detail = err.taskResult.error?.message ?? err.taskResult.stop_reason ?? err.taskResult.status;
+          await this.acpServer.sendUpdate(sessionId, [
+            { type: 'text', text: `Subtask "${err.subtaskId}" failed: ${detail}` },
+          ]);
+        } else {
+          const msg = err instanceof Error ? err.message : String(err);
+          await this.acpServer.sendUpdate(sessionId, [
+            { type: 'text', text: `Plan execution failed: ${msg}` },
+          ]);
+        }
         return;
       }
       const summary = await this._synthesize(results, userText);
@@ -330,8 +340,20 @@ export class Foreman {
           injected_mcps: [],
         };
 
-        const result = await this._runWorkerTask(workerEntry.url, payload, sessionId, undefined);
-        results.push(`[${subtask.id}] ${result}`);
+        const taskResult = await this._runWorkerTask(workerEntry.url, payload, sessionId, undefined);
+
+        if (taskResult.status !== 'completed') {
+          // Cancel remaining sibling handles before aborting.
+          for (const [id, handle] of this._activeHandles) {
+            await handle.cancel().catch((err: unknown) => {
+              this.logger.warn({ taskId: id, err: String(err) }, 'sibling cancel failed');
+            });
+          }
+          this._activeHandles.clear();
+          throw new PlanAbortedError(subtask.id, taskResult);
+        }
+
+        results.push(`[${subtask.id}] ${JSON.stringify(taskResult)}`);
       }
     }
 
@@ -347,12 +369,13 @@ export class Foreman {
     payload: TaskPayload,
     sessionId: string,
     signal?: AbortSignal,
-  ): Promise<string> {
+  ): Promise<TaskResultType> {
     const handle = await this.dispatchManager.dispatch(url, payload);
     this._activeHandles.set(handle.taskId, handle);
 
     try {
-      let resultText = '';
+      let structuredResult: TaskResultType | null = null;
+      let fallbackText = '';
 
       for await (const event of handle) {
         if (signal?.aborted) {
@@ -366,20 +389,30 @@ export class Foreman {
             await this._handleWorkerEscalation(handle.taskId, req, sessionId);
           }
         } else if (event.type === 'status') {
-          const text = extractStatusResult(event);
-          if (text) resultText = text;
+          const parsed = extractStatusResult(event);
+          if (parsed) structuredResult = parsed;
         } else if (event.type === 'artifact') {
-          resultText = extractArtifactText(event);
+          fallbackText = extractArtifactText(event);
         } else if (event.type === 'message') {
           const text = extractMessageText(event);
-          if (text) resultText += text;
+          if (text) fallbackText += text;
         } else if (event.type === 'error') {
           const data = event.data as Record<string, unknown> | null | undefined;
           throw new Error(`Worker error: ${data?.['reason'] ?? 'unknown'}`);
         }
       }
 
-      return resultText || '(no output)';
+      if (structuredResult) return structuredResult;
+
+      // Fallback: wrap unstructured output as a completed TaskResult.
+      return {
+        status: 'completed',
+        stop_reason: 'end_turn',
+        summary: fallbackText || '(no output)',
+        branch_ref: '',
+        session_transcript_ref: '',
+        error: null,
+      };
     } finally {
       this._activeHandles.delete(handle.taskId);
     }
@@ -475,19 +508,20 @@ function extractArtifactText(event: StreamEvent): string {
   return chunks.join('');
 }
 
-function extractStatusResult(event: StreamEvent): string {
+function extractStatusResult(event: StreamEvent): TaskResultType | null {
   const data = event.data as Record<string, unknown> | null | undefined;
-  if (!data?.['final']) return '';
+  if (!data?.['final']) return null;
   const message = data['message'] as Record<string, unknown> | null | undefined;
-  if (!message) return '';
+  if (!message) return null;
   const parts = (message['parts'] as unknown[]) ?? [];
   for (const part of parts) {
     const p = part as Record<string, unknown> | null | undefined;
     if (p?.['kind'] === 'data' && p['data']) {
-      return JSON.stringify(p['data']);
+      const parsed = TaskResult.safeParse(p['data']);
+      if (parsed.success) return parsed.data;
     }
   }
-  return '';
+  return null;
 }
 
 function extractMessageText(event: StreamEvent): string {
