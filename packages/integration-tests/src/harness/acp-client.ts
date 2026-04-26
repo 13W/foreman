@@ -1,11 +1,11 @@
 import { ChildProcess } from 'node:child_process';
-import { ClientSideConnection, ndJsonStream, Client, SessionUpdate, PermissionRequestParams, PermissionRequestResponse } from '@agentclientprotocol/sdk';
+import { ClientSideConnection, ndJsonStream, Client, SessionUpdate, RequestPermissionRequest, RequestPermissionResponse, PermissionOption } from '@agentclientprotocol/sdk';
 import { Readable, Writable } from 'node:stream';
 
 export class TestACPClient {
   public connection: ClientSideConnection;
   public updates: SessionUpdate[] = [];
-  public permissionRequests: PermissionRequestParams[] = [];
+  public permissionRequests: RequestPermissionRequest[] = [];
 
   constructor(child: ChildProcess) {
     const stream = ndJsonStream(
@@ -14,12 +14,12 @@ export class TestACPClient {
     );
 
     const clientStub: Client = {
-      requestPermission: async (params: PermissionRequestParams): Promise<PermissionRequestResponse> => {
+      requestPermission: async (params: RequestPermissionRequest): Promise<RequestPermissionResponse> => {
         this.permissionRequests.push(params);
         
         // Take a default response strategy: pick the first option whose kind === 'allow_once'.
         // If none, pick the first option.
-        const allowOnceOption = params.options.find(opt => opt.kind === 'allow_once');
+        const allowOnceOption = params.options.find((opt: PermissionOption) => opt.kind === 'allow_once');
         const selectedOption = allowOnceOption || params.options[0];
         
         if (!selectedOption) {
@@ -27,8 +27,10 @@ export class TestACPClient {
         }
         
         return {
-          outcome: 'selected',
-          optionId: selectedOption.id
+          outcome: {
+            outcome: 'selected',
+            optionId: selectedOption.optionId
+          }
         };
       },
       sessionUpdate: async (params) => {
