@@ -14,6 +14,14 @@ export interface WorkerCatalogEntry {
   last_check_at: Date;
 }
 
+export function toToolName(worker: WorkerCatalogEntry): string {
+  const raw = worker.agent_card?.name ?? worker.name_hint ?? new URL(worker.url).hostname;
+  return raw
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
 export class WorkerCatalog {
   private readonly _entries = new Map<string, WorkerCatalogEntry>();
 
