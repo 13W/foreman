@@ -4,9 +4,11 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { registerProcess } from './cleanup.js';
 import YAML from 'yaml';
+import type { MockAnthropicServer } from './mock-anthropic-server.js';
 
 export interface SpawnForemanOpts {
   workers: { url: string; name_hint?: string }[];
+  mockAnthropic?: MockAnthropicServer;
 }
 
 export async function spawnForeman(opts: SpawnForemanOpts) {
@@ -39,9 +41,20 @@ export async function spawnForeman(opts: SpawnForemanOpts) {
   writeFileSync(configPath, YAML.stringify(config));
 
   const foremanBin = join(import.meta.dirname, '..', '..', '..', 'foreman', 'dist', 'cli.js');
+  
+  const env: Record<string, string> = { 
+    ...process.env,
+    FAKE_API_KEY: 'sk-fake-123',
+  };
+
+  if (opts.mockAnthropic) {
+    const { url } = await opts.mockAnthropic.start();
+    env.ANTHROPIC_BASE_URL = url;
+  }
+
   const child = spawn('node', [foremanBin, '--config', configPath], {
     stdio: ['pipe', 'pipe', 'inherit'], // stdin/stdout piped for ACP, stderr inherited for logs
-    env: { ...process.env, FAKE_API_KEY: 'sk-fake-123' },
+    env,
   });
 
   registerProcess(child);

@@ -1,0 +1,11 @@
+{
+  "default": {
+    "actions": [
+      {
+        "type": "agent_message_chunk",
+        "text": "{\"plan_id\":\"p1\",\"originator_intent\":\"Refactor the auth module and add tests\",\"goal_summary\":\"Refactor and test auth module\",\"source\":\"external_planner\",\"batches\":[{\"batch_id\":\"b1\",\"subtasks\":[{\"id\":\"t1\",\"assigned_agent\":\"coder\",\"description\":\"Refactor auth.ts\",\"inputs\":{\"relevant_files\":[\"auth.ts\"]},\"expected_output\":\"Refactored auth.ts\"},{\"id\":\"t2\",\"assigned_agent\":\"tester\",\"description\":\"Write tests for auth.ts\",\"inputs\":{\"relevant_files\":[\"auth.ts\"],\"context_from_prior_tasks\":[{\"task_id\":\"t1\",\"summary\":\"Auth module refactored\"}]},\"expected_output\":\"Passing tests\"}]}]}"
+      },
+      { "type": "stop", "reason": "end_turn" }
+    ]
+  }
+}

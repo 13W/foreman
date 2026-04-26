@@ -1,0 +1,8 @@
+{
+  "default": {
+    "actions": [
+      { "type": "agent_message_chunk", "text": "All tests passed (12/12)." },
+      { "type": "stop", "reason": "end_turn" }
+    ]
+  }
+}

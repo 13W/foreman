@@ -1,9 +1,18 @@
 import { ChildProcess } from 'node:child_process';
 
+interface Stoppable {
+  stop(): Promise<void>;
+}
+
 const spawnedProcesses: ChildProcess[] = [];
+const stoppableServers: Stoppable[] = [];
 
 export function registerProcess(process: ChildProcess) {
   spawnedProcesses.push(process);
+}
+
+export function registerServer(server: Stoppable) {
+  stoppableServers.push(server);
 }
 
 export async function cleanupAll() {
@@ -27,6 +36,9 @@ export async function cleanupAll() {
     });
   });
 
-  await Promise.all(killPromises);
+  const serverPromises = stoppableServers.map((s) => s.stop().catch(() => {}));
+
+  await Promise.all([...killPromises, ...serverPromises]);
   spawnedProcesses.length = 0;
+  stoppableServers.length = 0;
 }

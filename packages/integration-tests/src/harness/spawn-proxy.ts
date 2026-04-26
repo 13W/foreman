@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { registerProcess } from './cleanup.js';
 import YAML from 'yaml';
+import type { AgentSkill } from '@foreman-stack/shared';
 
 export async function getFreePort(): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -20,12 +21,16 @@ export async function getFreePort(): Promise<number> {
 export interface SpawnProxyOpts {
   scriptPath: string;
   name?: string;
+  description?: string;
+  skills?: AgentSkill[];
 }
 
 export async function spawnProxy(opts: SpawnProxyOpts) {
   const port = await getFreePort();
   const url = `http://127.0.0.1:${port}`;
   const name = opts.name || 'test-agent';
+  const description = opts.description || 'A test agent';
+  const skills = opts.skills || [];
   const tempDir = join(tmpdir(), `foreman-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   mkdirSync(tempDir, { recursive: true });
 
@@ -35,6 +40,10 @@ export async function spawnProxy(opts: SpawnProxyOpts) {
       name,
       version: '0.1.0',
       bind: `127.0.0.1:${port}`,
+    },
+    role: {
+      description,
+      skills,
     },
     wrapped_agent: {
       command: 'node',
