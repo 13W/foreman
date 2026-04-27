@@ -20,6 +20,7 @@ import type { WorktreeResult } from './worktree-manager.js';
 import { WorktreeManager } from './worktree-manager.js';
 import type { ProxyConfig } from './config.js';
 import { logger as defaultLogger } from './logger.js';
+import type { MsgLogger } from './msg-logger.js';
 import {
   buildSystemPrompt,
   buildTaskResult,
@@ -39,6 +40,7 @@ export class ProxyServer {
     private readonly worktreeManager: WorktreeManager,
     private readonly acpClientManager: ACPClientManager,
     logger?: pino.Logger,
+    private readonly msgLogger?: MsgLogger,
   ) {
     this.logger = logger ?? defaultLogger;
   }
@@ -72,6 +74,7 @@ export class ProxyServer {
     const { taskId } = handle;
     const log = this.logger.child({ taskId });
     log.info({ description: payload.description.slice(0, 120) }, 'task received');
+    this.msgLogger?.log('in', 'a2a', 'task', payload, { taskId });
 
     // 1. Resolve base branch
     const baseBranch = payload.base_branch ?? this.config.worktrees.default_base_branch;
@@ -165,6 +168,7 @@ export class ProxyServer {
     } else {
       log.error({ stopReason: result.stop_reason, error: result.error }, 'task finished: failed');
     }
+    this.msgLogger?.log('out', 'a2a', 'result', result, { taskId });
     await this.a2aServer.completeTask(taskId, result);
   }
 
@@ -174,10 +178,15 @@ export class ProxyServer {
     session: SessionHandle,
     worktreeResult: WorktreeResult,
   ): Promise<{ stopReason: string; outputText: string }> {
+    const sessionId = session.getId();
+    this.msgLogger?.log('out', 'acp', 'prompt', content, { taskId, sessionId });
+
     const stream = this.acpClientManager.sendPrompt(session, content);
     let outputText = '';
 
     for await (const event of stream) {
+      this.msgLogger?.log('in', 'acp', event.kind, event, { taskId, sessionId });
+
       if (event.kind === 'permission_request') {
         await this.handlePermissionEvent(taskId, event, worktreeResult);
       } else if (event.kind === 'stop') {
@@ -188,7 +197,9 @@ export class ProxyServer {
         }
         const mapped = mapPromptEventToStreamEvent(event);
         if (mapped) {
-          await this.a2aServer.sendUpdate(taskId, { ...mapped, taskId } as StreamEvent);
+          const update = { ...mapped, taskId } as StreamEvent;
+          this.msgLogger?.log('out', 'a2a', 'update', update, { taskId });
+          await this.a2aServer.sendUpdate(taskId, update);
         }
       }
     }
@@ -204,18 +215,22 @@ export class ProxyServer {
     const policy = this.evaluateProxyPolicy(event.request, worktreeResult.worktreePath);
 
     if (policy === 'approve') {
+      this.msgLogger?.log('out', 'acp', 'permission_response', { kind: 'allow_once', auto: true }, { taskId });
       await event.respond({ kind: 'allow_once' });
       return;
     }
 
     const timeoutMs = this.config.permissions.permission_timeout_sec * 1000;
     const permRequest = mapToPermissionRequest(event.request);
+    this.msgLogger?.log('out', 'a2a', 'permission_request', permRequest, { taskId });
     let decision: PermissionDecision;
     try {
       decision = await this.a2aServer.requestInput(taskId, permRequest, { timeoutMs });
     } catch (_err) {
       decision = { kind: 'reject_once' };
     }
+    this.msgLogger?.log('in', 'a2a', 'permission_response', decision, { taskId });
+    this.msgLogger?.log('out', 'acp', 'permission_response', decision, { taskId });
     await event.respond(decision);
   }
 

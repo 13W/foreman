@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
 import { createLogger, configureLevel } from './logger.js';
+import { MsgLogger } from './msg-logger.js';
 import { loadConfig, DEFAULT_CONFIG_PATH } from './config.js';
 import { ProxyServer } from './proxy-server.js';
 import { DefaultA2AServer } from './a2a/server.js';
@@ -56,7 +57,16 @@ const acpClientManager = new DefaultACPClientManager();
 const subprocessPool = new SubprocessPool(config, acpClientManager);
 const worktreeManager = new WorktreeManager(config);
 const a2aServer = new DefaultA2AServer();
-const server = new ProxyServer(config, a2aServer, subprocessPool, worktreeManager, acpClientManager, logger);
+
+const msgLogger = config.logging.msg_log_file
+  ? new MsgLogger(config.logging.msg_log_file)
+  : undefined;
+
+if (msgLogger) {
+  logger.info({ file: config.logging.msg_log_file }, 'Message JSONL logging enabled');
+}
+
+const server = new ProxyServer(config, a2aServer, subprocessPool, worktreeManager, acpClientManager, logger, msgLogger);
 const shutdownTimeout = config.runtime.task_hard_timeout_sec > 0 ? 30_000 : 30_000;
 
 let shuttingDown = false;
@@ -75,6 +85,7 @@ async function gracefulShutdown(signal: string): Promise<void> {
 
   try {
     await server.shutdown();
+    await msgLogger?.close();
     logger.info('Shutdown complete');
   } catch (err) {
     logger.error({ err }, 'Error during shutdown');
