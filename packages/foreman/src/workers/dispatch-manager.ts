@@ -149,6 +149,8 @@ export class DispatchManager {
   async dispatch(url: string, payload: TaskPayload): Promise<DispatchHandle> {
     await this._semaphore.acquire();
 
+    logger.info({ url, description: payload.description.slice(0, 120) }, 'dispatching task to worker');
+
     let taskId: string | undefined;
 
     for (let attempt = 0; attempt < DISPATCH_MAX_RETRIES; attempt++) {
@@ -167,6 +169,8 @@ export class DispatchManager {
         await delayWithJitter(attempt);
       }
     }
+
+    logger.info({ url, taskId }, 'task accepted by worker');
 
     const finalTaskId = taskId!;
     const gen = makeEventStream(finalTaskId, this._client, () => this._semaphore.release());

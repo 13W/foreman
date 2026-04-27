@@ -415,7 +415,6 @@ export class Foreman {
 
     sessionState.abortController = new AbortController();
     const loop = new LLMLoop(this.llmClient, registry);
-    let finalText = '';
 
     try {
       // Drive the generator manually to capture the return value (updated history).
@@ -428,9 +427,12 @@ export class Foreman {
         }
         const event = result.value;
         if (event.type === 'text_chunk') {
-          finalText += event.text;
-        } else if (event.type === 'stop' && event.stopReason === 'tool_use') {
-          finalText = '';
+          // Stream foreman's thinking to the user in real-time
+          await this.acpServer.sendUpdate(sessionId, [{ type: 'text', text: event.text }]);
+        } else if (event.type === 'tool_call') {
+          const input = event.input as Record<string, unknown>;
+          const desc = String(input.description ?? '').slice(0, 120);
+          this.logger.info({ sessionId, worker: event.name, description: desc }, 'LLM → worker dispatch');
         }
       }
     } finally {
@@ -439,8 +441,6 @@ export class Foreman {
 
     if (capturedPlan) {
       await this._executePlan(capturedPlan, sessionId, sessionState, userText, available);
-    } else if (finalText) {
-      await this.acpServer.sendUpdate(sessionId, [{ type: 'text', text: finalText }]);
     }
   }
 
@@ -562,15 +562,24 @@ export class Foreman {
             await this._handleWorkerEscalation(handle.taskId, req, sessionId);
           }
         } else if (event.type === 'status') {
+          const data = event.data as Record<string, unknown> | null | undefined;
+          const state = data?.['state'] as string | undefined;
+          const final = data?.['final'] as boolean | undefined;
+          if (state) this.logger.info({ taskId: handle.taskId, agentUrl: url, state, final }, 'worker status');
           const parsed = extractStatusResult(event);
           if (parsed) structuredResult = parsed;
         } else if (event.type === 'artifact') {
           fallbackText = extractArtifactText(event);
+          this.logger.debug({ taskId: handle.taskId, agentUrl: url, len: fallbackText.length }, 'worker artifact');
         } else if (event.type === 'message') {
           const text = extractMessageText(event);
-          if (text) fallbackText += text;
+          if (text) {
+            this.logger.info({ taskId: handle.taskId, agentUrl: url, message: text.slice(0, 200) }, 'worker message');
+            fallbackText += text;
+          }
         } else if (event.type === 'error') {
           const data = event.data as Record<string, unknown> | null | undefined;
+          this.logger.warn({ taskId: handle.taskId, agentUrl: url, reason: data?.['reason'] }, 'worker error');
           throw new Error(`Worker error: ${data?.['reason'] ?? 'unknown'}`);
         }
       }

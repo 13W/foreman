@@ -114,6 +114,10 @@ export class PlanExecutor {
           injected_mcps: [],
         };
         const handle = await this._dispatchManager.dispatch(worker.url, payload);
+        this._logger.info(
+          { subtaskId: subtask.id, agentUrl: worker.url, taskId: handle.taskId },
+          'subtask dispatched',
+        );
         this._sessionState.activeDispatchHandles.set(handle.taskId, handle);
         return { subtask, handle };
       }),
@@ -175,15 +179,23 @@ export class PlanExecutor {
       } else {
         this._onSubtaskEvent(subtaskId, event);
         if (event.type === 'status') {
+          const data = event.data as Record<string, unknown> | null | undefined;
+          const state = data?.['state'] as string | undefined;
+          const final = data?.['final'] as boolean | undefined;
+          if (state) this._logger.info({ subtaskId, taskId: handle.taskId, state, final }, 'subtask status');
           const parsed = extractStatusResult(event);
           if (parsed) structuredResult = parsed;
         } else if (event.type === 'artifact') {
           fallbackText = extractArtifactText(event);
         } else if (event.type === 'message') {
           const text = extractMessageText(event);
-          if (text) fallbackText += text;
+          if (text) {
+            this._logger.info({ subtaskId, taskId: handle.taskId, message: text.slice(0, 200) }, 'subtask message');
+            fallbackText += text;
+          }
         } else if (event.type === 'error') {
           const data = event.data as Record<string, unknown> | null | undefined;
+          this._logger.warn({ subtaskId, taskId: handle.taskId, reason: data?.['reason'] }, 'subtask error');
           throw new Error(`Worker error: ${data?.['reason'] ?? 'unknown'}`);
         }
       }
