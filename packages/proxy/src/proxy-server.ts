@@ -71,6 +71,7 @@ export class ProxyServer {
   private async handleTask(payload: TaskPayload, handle: TaskHandle): Promise<void> {
     const { taskId } = handle;
     const log = this.logger.child({ taskId });
+    log.info({ description: payload.description.slice(0, 120) }, 'task received');
 
     // 1. Resolve base branch
     const baseBranch = payload.base_branch ?? this.config.worktrees.default_base_branch;
@@ -140,6 +141,7 @@ export class ProxyServer {
 
         const followUpText = await this.a2aServer.requestFollowUp(taskId, result);
         if (followUpText === null) {
+          log.info('no follow-up received, task done');
           result = buildTaskResult('cancelled', worktreeResult);
           break;
         }
@@ -156,6 +158,7 @@ export class ProxyServer {
       );
     }
 
+    log.info({ status: result.status, stopReason: result.stop_reason }, 'task completed');
     await this.a2aServer.completeTask(taskId, result);
   }
 
@@ -183,6 +186,7 @@ export class ProxyServer {
         }
       }
     }
+    this.logger.warn({ taskId }, 'ACP stream ended without stop event — task cancelled');
     return { stopReason: 'cancelled', outputText };
   }
 

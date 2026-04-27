@@ -133,6 +133,10 @@ export class PlanExecutor {
         .catch(async (err: unknown) => {
           if (!firstFailure) {
             firstFailure = err instanceof Error ? err : new Error(String(err));
+            this._logger.error(
+              { subtaskId: subtask.id, taskId: handle.taskId, err: String(firstFailure) },
+              'subtask failed, cancelling siblings',
+            );
             const siblings = [...activeHandles].filter((h) => h !== handle);
             await Promise.all(
               siblings.map((h) =>
@@ -211,6 +215,10 @@ export class PlanExecutor {
     };
 
     if (result.status !== 'completed') {
+      this._logger.error(
+        { subtaskId, taskId: handle.taskId, status: result.status, stopReason: result.stop_reason },
+        'subtask finished with non-completed status',
+      );
       throw new PlanAbortedError(subtaskId, result);
     }
 

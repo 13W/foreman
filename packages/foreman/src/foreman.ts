@@ -510,8 +510,13 @@ export class Foreman {
         const detail =
           err.taskResult.error?.message ?? err.taskResult.stop_reason ?? err.taskResult.status;
         failureInfo = `Subtask "${err.subtaskId}" failed: ${detail}`;
+        this.logger.error(
+          { sessionId, subtaskId: err.subtaskId, status: err.taskResult.status, detail },
+          'plan execution aborted',
+        );
       } else {
         failureInfo = `Plan execution failed: ${err instanceof Error ? err.message : String(err)}`;
+        this.logger.error({ sessionId, err: String(err) }, 'plan execution failed');
       }
       const summary = await this._synthesize([failureInfo], userText);
       await this.acpServer.sendUpdate(sessionId, [{ type: 'text', text: summary }]);
@@ -552,6 +557,7 @@ export class Foreman {
 
       for await (const event of handle) {
         if (signal?.aborted) {
+          this.logger.warn({ taskId: handle.taskId, agentUrl: url }, 'worker task cancelled via abort signal');
           await handle.cancel().catch(() => {});
           throw new Error('Cancelled');
         }
