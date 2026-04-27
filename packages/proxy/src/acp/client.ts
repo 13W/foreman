@@ -168,12 +168,13 @@ export class DefaultACPClientManager implements ACPClientManager {
 
           if (update.sessionUpdate === 'agent_message_chunk') {
             const chunk = update as ContentChunk;
-            const preview = typeof chunk.content === 'string' ? chunk.content.slice(0, 80) : undefined;
+            const cb = chunk.content;
+            const preview = cb.type === 'text' ? cb.text.slice(0, 80) : cb.type;
             logger.debug({ sessionId: params.sessionId, updateType, preview }, 'ACP sessionUpdate received');
             queue.push({ kind: 'agent_message_chunk', content: chunk.content });
           } else if (update.sessionUpdate === 'tool_call') {
             const tc = update as unknown as ToolCall;
-            logger.debug({ sessionId: params.sessionId, updateType, toolName: tc.name }, 'ACP sessionUpdate received');
+            logger.debug({ sessionId: params.sessionId, updateType, toolTitle: tc.title }, 'ACP sessionUpdate received');
             queue.push({ kind: 'tool_call', update: tc });
           } else if (update.sessionUpdate === 'tool_call_update') {
             logger.debug({ sessionId: params.sessionId, updateType }, 'ACP sessionUpdate received');
