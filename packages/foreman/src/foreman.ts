@@ -26,7 +26,7 @@ import type {
   TaskResult as TaskResultType,
 } from '@foreman-stack/shared';
 import { mapPermissionOptionToDecision } from './permissions/mapper.js';
-import { PlanAbortedError, PlanExecutor } from './plan/index.js';
+import { PlanAbortedError, PlanExecutor, PlannerFallbackHandler } from './plan/index.js';
 import type { PlannerSession, PlannerSessionOptions } from './plan/index.js';
 import { SessionManager } from './session/manager.js';
 import { SessionLimitError } from './session/errors.js';
@@ -92,6 +92,7 @@ export interface ForemanOpts {
   config: ForemanConfig;
   sessionManager: SessionManager;
   plannerSessionFactory: (options: PlannerSessionOptions) => PlannerSession;
+  fallbackHandler?: PlannerFallbackHandler;
 }
 
 // ---------------------------------------------------------------------------
@@ -108,6 +109,7 @@ export class Foreman {
   private readonly llmClient: AnthropicLLMClient;
   private readonly sessionManager: SessionManager;
   private readonly plannerSessionFactory: (options: PlannerSessionOptions) => PlannerSession;
+  private readonly fallbackHandler: PlannerFallbackHandler;
 
   /** Active PlannerSessions by ACP sessionId — kept alive during plan execution for escalation. */
   private readonly _plannerSessions = new Map<string, PlannerSession>();
@@ -128,6 +130,13 @@ export class Foreman {
     this.llmClient = new AnthropicLLMClient(opts.config);
     this.sessionManager = opts.sessionManager;
     this.plannerSessionFactory = opts.plannerSessionFactory;
+    this.fallbackHandler =
+      opts.fallbackHandler ??
+      new PlannerFallbackHandler({
+        acpServer: this.acpServer,
+        catalog: this.catalog,
+        logger: this.logger,
+      });
   }
 
   async start(): Promise<void> {
@@ -214,16 +223,81 @@ export class Foreman {
 
     const available = this.catalog.getAvailable();
     const hasPlanner = available.some((w) => this.catalog.isPlanner(w));
+    const userText = extractTextFromContent(content);
 
     if (!hasPlanner) {
-      // TODO(t4.8): When no planner in catalog, ask user how to proceed (self-plan / delegate / dispatch-whole / cancel).
-      await this.acpServer.sendUpdate(sessionId, [
-        { type: 'text', text: 'No planner agent available; please configure one.' },
-      ]);
-      return;
-    }
+      const choice = await this.fallbackHandler.ask(sessionId, userText);
 
-    const userText = extractTextFromContent(content);
+      switch (choice.kind) {
+        case 'cancel':
+          await this.acpServer.sendUpdate(sessionId, [{ type: 'text', text: 'Task cancelled.' }]);
+          return;
+
+        case 'self_plan': {
+          const plannerSession = this.plannerSessionFactory({
+            mode: 'self_planned',
+            llmClient: this.llmClient,
+            config: this.config,
+            logger: this.logger,
+          });
+          this._plannerSessions.set(sessionId, plannerSession);
+          sessionState.planOwnerRef = { kind: 'self' };
+          await plannerSession.open(userText);
+          const selfPlan = plannerSession.getPlan();
+          if (!selfPlan) {
+            await this.acpServer.sendUpdate(sessionId, [
+              { type: 'text', text: 'Could not generate a self-made plan.' },
+            ]);
+            await plannerSession.close();
+            this._plannerSessions.delete(sessionId);
+            return;
+          }
+          sessionState.activePlan = selfPlan;
+          await this._executePlan(selfPlan, sessionId, sessionState, userText, available);
+          return;
+        }
+
+        case 'delegate': {
+          const plannerSession = this.plannerSessionFactory({
+            mode: 'external_planner',
+            dispatchManager: this.dispatchManager,
+            a2aClient: this.a2aClient,
+            plannerUrl: choice.workerUrl,
+            config: this.config,
+            logger: this.logger,
+          });
+          this._plannerSessions.set(sessionId, plannerSession);
+          sessionState.planOwnerRef = { kind: 'external', taskId: '' };
+          await plannerSession.open(userText);
+          const delegatePlan = plannerSession.getPlan();
+          sessionState.planOwnerRef = { kind: 'external', taskId: plannerSession.taskId ?? '' };
+          if (!delegatePlan) {
+            await this.acpServer.sendUpdate(sessionId, [
+              { type: 'text', text: `[${choice.workerName}] did not return a valid plan.` },
+            ]);
+            await plannerSession.close();
+            this._plannerSessions.delete(sessionId);
+            return;
+          }
+          sessionState.activePlan = delegatePlan;
+          await this._executePlan(delegatePlan, sessionId, sessionState, userText, available);
+          return;
+        }
+
+        case 'dispatch_whole': {
+          const plannerSession = this.plannerSessionFactory({
+            mode: 'single_task_dispatch',
+            config: this.config,
+            logger: this.logger,
+          });
+          this._plannerSessions.set(sessionId, plannerSession);
+          sessionState.planOwnerRef = { kind: 'single_task_dispatch' };
+          sessionState.activePlan = choice.plan;
+          await this._executePlan(choice.plan, sessionId, sessionState, userText, available);
+          return;
+        }
+      }
+    }
     const registry = new ToolRegistry();
     // Escalation gate bypassed; escalation is handled at the A2A stream level.
     registry.setEscalationCallback(async () => true);
@@ -364,89 +438,98 @@ export class Foreman {
     }
 
     if (capturedPlan) {
-      // Build subtask → human worker name map for transparency updates.
-      const subtaskWorkerNames = new Map<string, string>();
-      for (const batch of capturedPlan.batches) {
-        for (const subtask of batch.subtasks) {
-          const worker = available.find(
-            (w) =>
-              toToolName(w) === subtask.assigned_agent ||
-              w.agent_card?.name === subtask.assigned_agent,
-          );
-          subtaskWorkerNames.set(
-            subtask.id,
-            worker?.agent_card?.name ?? subtask.assigned_agent,
-          );
-        }
-      }
-      const seenSubtasks = new Set<string>();
-
-      const executor = new PlanExecutor({
-        dispatchManager: this.dispatchManager,
-        catalog: this.catalog,
-        sessionState,
-        config: this.config,
-        logger: this.logger,
-        onWorkerEscalation: async (taskId, request) => {
-          await this._handleWorkerEscalation(taskId, request, sessionId);
-        },
-        onSubtaskEvent: (subtaskId, event) => {
-          const workerName = subtaskWorkerNames.get(subtaskId) ?? subtaskId;
-          if (!seenSubtasks.has(subtaskId)) {
-            seenSubtasks.add(subtaskId);
-            this.acpServer
-              .sendUpdate(sessionId, [{ type: 'text', text: `[${workerName}] starting...` }])
-              .catch((err: unknown) =>
-                this.logger.warn({ err: String(err) }, 'transparency send failed'),
-              );
-          }
-          const update = this._transparencyText(workerName, event);
-          if (update) {
-            this.acpServer
-              .sendUpdate(sessionId, [{ type: 'text', text: update }])
-              .catch((err: unknown) =>
-                this.logger.warn({ err: String(err) }, 'transparency send failed'),
-              );
-          }
-        },
-      });
-
-      let results: string[];
-      try {
-        const { subtaskResults } = await executor.execute(capturedPlan, userText);
-        results = subtaskResults.map(
-          ({ subtaskId, result }) => `[${subtaskId}] ${JSON.stringify(result)}`,
-        );
-      } catch (err) {
-        let failureInfo: string;
-        if (err instanceof PlanAbortedError) {
-          const detail =
-            err.taskResult.error?.message ?? err.taskResult.stop_reason ?? err.taskResult.status;
-          failureInfo = `Subtask "${err.subtaskId}" failed: ${detail}`;
-        } else {
-          failureInfo = `Plan execution failed: ${err instanceof Error ? err.message : String(err)}`;
-        }
-        const summary = await this._synthesize([failureInfo], userText);
-        await this.acpServer.sendUpdate(sessionId, [{ type: 'text', text: summary }]);
-        return;
-      } finally {
-        // Always close plannerSession after plan execution.
-        const plannerSession = this._plannerSessions.get(sessionId);
-        if (plannerSession) {
-          await plannerSession.close().catch((err: unknown) =>
-            this.logger.warn({ err: String(err) }, 'planner session close error'),
-          );
-          this._plannerSessions.delete(sessionId);
-        }
-        sessionState.activePlan = null;
-        sessionState.planOwnerRef = null;
-      }
-
-      const summary = await this._synthesize(results, userText);
-      await this.acpServer.sendUpdate(sessionId, [{ type: 'text', text: summary }]);
+      await this._executePlan(capturedPlan, sessionId, sessionState, userText, available);
     } else if (finalText) {
       await this.acpServer.sendUpdate(sessionId, [{ type: 'text', text: finalText }]);
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Plan execution — shared by planner-present and fallback paths
+  // ---------------------------------------------------------------------------
+
+  private async _executePlan(
+    plan: PlanType,
+    sessionId: string,
+    sessionState: SessionState,
+    userText: string,
+    available: WorkerCatalogEntry[],
+  ): Promise<void> {
+    const subtaskWorkerNames = new Map<string, string>();
+    for (const batch of plan.batches) {
+      for (const subtask of batch.subtasks) {
+        const worker = available.find(
+          (w) =>
+            toToolName(w) === subtask.assigned_agent ||
+            w.agent_card?.name === subtask.assigned_agent,
+        );
+        subtaskWorkerNames.set(subtask.id, worker?.agent_card?.name ?? subtask.assigned_agent);
+      }
+    }
+    const seenSubtasks = new Set<string>();
+
+    const executor = new PlanExecutor({
+      dispatchManager: this.dispatchManager,
+      catalog: this.catalog,
+      sessionState,
+      config: this.config,
+      logger: this.logger,
+      onWorkerEscalation: async (taskId, request) => {
+        await this._handleWorkerEscalation(taskId, request, sessionId);
+      },
+      onSubtaskEvent: (subtaskId, event) => {
+        const workerName = subtaskWorkerNames.get(subtaskId) ?? subtaskId;
+        if (!seenSubtasks.has(subtaskId)) {
+          seenSubtasks.add(subtaskId);
+          this.acpServer
+            .sendUpdate(sessionId, [{ type: 'text', text: `[${workerName}] starting...` }])
+            .catch((err: unknown) =>
+              this.logger.warn({ err: String(err) }, 'transparency send failed'),
+            );
+        }
+        const update = this._transparencyText(workerName, event);
+        if (update) {
+          this.acpServer
+            .sendUpdate(sessionId, [{ type: 'text', text: update }])
+            .catch((err: unknown) =>
+              this.logger.warn({ err: String(err) }, 'transparency send failed'),
+            );
+        }
+      },
+    });
+
+    let results: string[];
+    try {
+      const { subtaskResults } = await executor.execute(plan, userText);
+      results = subtaskResults.map(
+        ({ subtaskId, result }) => `[${subtaskId}] ${JSON.stringify(result)}`,
+      );
+    } catch (err) {
+      let failureInfo: string;
+      if (err instanceof PlanAbortedError) {
+        const detail =
+          err.taskResult.error?.message ?? err.taskResult.stop_reason ?? err.taskResult.status;
+        failureInfo = `Subtask "${err.subtaskId}" failed: ${detail}`;
+      } else {
+        failureInfo = `Plan execution failed: ${err instanceof Error ? err.message : String(err)}`;
+      }
+      const summary = await this._synthesize([failureInfo], userText);
+      await this.acpServer.sendUpdate(sessionId, [{ type: 'text', text: summary }]);
+      return;
+    } finally {
+      const plannerSession = this._plannerSessions.get(sessionId);
+      if (plannerSession) {
+        await plannerSession.close().catch((err: unknown) =>
+          this.logger.warn({ err: String(err) }, 'planner session close error'),
+        );
+        this._plannerSessions.delete(sessionId);
+      }
+      sessionState.activePlan = null;
+      sessionState.planOwnerRef = null;
+    }
+
+    const summary = await this._synthesize(results, userText);
+    await this.acpServer.sendUpdate(sessionId, [{ type: 'text', text: summary }]);
   }
 
   // ---------------------------------------------------------------------------

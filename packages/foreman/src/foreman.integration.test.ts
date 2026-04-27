@@ -8,7 +8,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Foreman } from './foreman.js';
 import { SessionManager } from './session/manager.js';
-import { createPlannerSession } from './plan/index.js';
+import { createPlannerSession, PlannerFallbackHandler } from './plan/index.js';
+import type { FallbackChoice } from './plan/index.js';
 import { DispatchHandle } from './workers/task-handle.js';
 import type { StreamEvent, AgentCardMetadata } from '@foreman-stack/shared';
 import type { LLMEvent } from './llm/client.js';
@@ -52,7 +53,7 @@ const PLANNER_CARD: AgentCardMetadata = {
   name: 'planner',
   url: 'http://planner.test',
   version: '1.0',
-  skills: [{ id: 'task_decomposition', name: 'Task Decomposition', description: '' }],
+  skills: [{ id: 'task_decomposition', name: 'Task Decomposition', description: '', tags: [] }],
 };
 const CODER_CARD: AgentCardMetadata = {
   name: 'coder',
@@ -75,7 +76,7 @@ function makeHandle(
   taskId: string,
   url: string,
   events: StreamEvent[],
-  cancelFn = vi.fn<[], Promise<void>>().mockResolvedValue(undefined),
+  cancelFn = vi.fn().mockResolvedValue(undefined) as () => Promise<void>,
 ): DispatchHandle {
   async function* gen() {
     yield* events;
@@ -171,12 +172,12 @@ async function buildForeman(): Promise<Foreman> {
 
   // Pre-populate catalog by mocking fetchAgentCard.
   vi.spyOn(priv(foreman).a2aClient, 'fetchAgentCard').mockImplementation(
-    async (url: string): Promise<AgentCardMetadata> => {
+    (async (url: any): Promise<AgentCardMetadata> => {
       if (url === 'http://planner.test') return PLANNER_CARD;
       if (url === 'http://coder.test') return CODER_CARD;
       if (url === 'http://tester.test') return TESTER_CARD;
       throw new Error(`Unknown agent URL: ${url}`);
-    },
+    }) as any,
   );
   await priv(foreman).catalog.loadFromConfig(BASE_CONFIG.workers);
 
@@ -234,22 +235,22 @@ describe('Foreman integration — happy path', () => {
 
     // Dispatch mock: planner → plan; coder + tester → success.
     vi.spyOn(priv(foreman).dispatchManager, 'dispatch').mockImplementation(
-      async (url: string): Promise<DispatchHandle> => {
+      (async (url: any): Promise<DispatchHandle> => {
         if (url === 'http://planner.test') return makePlannerHandle('planner-task-1');
         if (url === 'http://coder.test') return makeHandle('coder-task-1', url, [makeCompletedStatusEvent('coder-task-1')]);
         if (url === 'http://tester.test') return makeHandle('tester-task-1', url, [makeCompletedStatusEvent('tester-task-1')]);
         throw new Error(`Unexpected dispatch to ${url}`);
-      },
+      }) as any,
     );
 
     // Capture sendUpdate calls.
     const sendUpdates: string[] = [];
     vi.spyOn(priv(foreman).acpServer, 'sendUpdate').mockImplementation(
-      async (_sid: string, content: Array<{ type: string; text?: string }>) => {
-        for (const block of content) {
+      (async (_sid: any, content: any) => {
+        for (const block of content as Array<{ type: string; text?: string }>) {
           if (block.type === 'text' && block.text) sendUpdates.push(block.text);
         }
-      },
+      }) as any,
     );
 
     await priv(foreman)._handlePrompt(SESSION_ID, [
@@ -290,7 +291,7 @@ describe('Foreman integration — cancel mid-execution', () => {
   });
 
   it('closing the session cancels active dispatch handles', async () => {
-    const cancelFn = vi.fn<[], Promise<void>>().mockResolvedValue(undefined);
+    const cancelFn = vi.fn().mockResolvedValue(undefined) as () => Promise<void>;
     const slowHandle = makeHandle(
       'slow-task',
       'http://coder.test',
@@ -429,5 +430,217 @@ describe('Foreman integration — plan owner defers to user', () => {
 
     expect(requestPermSpy).toHaveBeenCalled();
     expect(respondSpy).toHaveBeenCalledWith('worker-task-3', { kind: 'allow_once' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// No-planner fallback path
+// ---------------------------------------------------------------------------
+
+const NO_PLANNER_CONFIG = {
+  ...BASE_CONFIG,
+  workers: [
+    { url: 'http://coder.test' },
+    { url: 'http://tester.test' },
+  ],
+};
+
+function makeMockFallbackHandler(choice: FallbackChoice): PlannerFallbackHandler {
+  return { ask: vi.fn().mockResolvedValue(choice) } as unknown as PlannerFallbackHandler;
+}
+
+async function buildForemanNoPlanner(
+  fallbackHandler: PlannerFallbackHandler,
+): Promise<Foreman> {
+  const sessionManager = new SessionManager({
+    maxConcurrentSessions: NO_PLANNER_CONFIG.runtime.max_concurrent_sessions,
+  });
+
+  const foreman = new Foreman({
+    config: NO_PLANNER_CONFIG as never,
+    sessionManager,
+    plannerSessionFactory: createPlannerSession,
+    fallbackHandler,
+  });
+
+  vi.spyOn(priv(foreman).a2aClient, 'fetchAgentCard').mockImplementation(
+    (async (url: any): Promise<AgentCardMetadata> => {
+      if (url === 'http://coder.test') return CODER_CARD;
+      if (url === 'http://tester.test') return TESTER_CARD;
+      throw new Error(`Unknown agent URL: ${url}`);
+    }) as any,
+  );
+  await priv(foreman).catalog.loadFromConfig(NO_PLANNER_CONFIG.workers);
+
+  vi.spyOn(priv(foreman).acpServer, 'sendUpdate').mockResolvedValue(undefined);
+  vi.spyOn(priv(foreman).acpServer, 'requestPermission').mockResolvedValue({
+    optionId: 'allow_once',
+    kind: 'allow_once' as const,
+    name: 'Allow once',
+  });
+
+  return foreman;
+}
+
+describe('Foreman integration — no-planner fallback: cancel', () => {
+  const SESSION_ID = 'fallback-cancel-session';
+
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it('emits cancellation update and returns when user picks cancel', async () => {
+    const fallbackHandler = makeMockFallbackHandler({ kind: 'cancel' });
+    const foreman = await buildForemanNoPlanner(fallbackHandler);
+    priv(foreman).sessionManager.create(SESSION_ID, '/tmp');
+
+    const sendUpdates: string[] = [];
+    vi.spyOn(priv(foreman).acpServer, 'sendUpdate').mockImplementation(
+      (async (_sid: any, content: any) => {
+        for (const block of content as Array<{ type: string; text?: string }>) {
+          if (block.type === 'text' && block.text) sendUpdates.push(block.text);
+        }
+      }) as any,
+    );
+
+    await priv(foreman)._handlePrompt(SESSION_ID, [{ type: 'text', text: 'do something' }]);
+
+    expect(fallbackHandler.ask).toHaveBeenCalledWith(SESSION_ID, 'do something');
+    expect(sendUpdates).toEqual(['Task cancelled.']);
+  });
+});
+
+describe('Foreman integration — no-planner fallback: self_plan', () => {
+  const SESSION_ID = 'fallback-self-plan-session';
+
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it('executes self-generated plan when user picks self_plan', async () => {
+    const selfPlan = {
+      plan_id: 'self-plan-1',
+      originator_intent: 'do something',
+      goal_summary: 'Do it',
+      source: 'self_planned',
+      batches: [
+        {
+          batch_id: 'b1',
+          subtasks: [
+            {
+              id: 's1',
+              assigned_agent: 'coder',
+              description: 'implement it',
+              expected_output: null,
+              inputs: { relevant_files: [], constraints: [], context_from_prior_tasks: [] },
+            },
+          ],
+        },
+      ],
+    };
+
+    const mockPlannerSession = {
+      mode: 'self_planned' as const,
+      taskId: null,
+      open: vi.fn().mockResolvedValue(undefined),
+      ask: vi.fn(),
+      close: vi.fn().mockResolvedValue(undefined),
+      getPlan: vi.fn().mockReturnValue(selfPlan),
+    };
+
+    const fallbackHandler = makeMockFallbackHandler({ kind: 'self_plan' });
+    const foreman = await buildForemanNoPlanner(fallbackHandler);
+    priv(foreman).sessionManager.create(SESSION_ID, '/tmp');
+
+    // Inject mock plannerSessionFactory so self_planned returns our mock.
+    priv(foreman).plannerSessionFactory = vi.fn().mockReturnValue(mockPlannerSession);
+
+    vi.spyOn(priv(foreman).dispatchManager, 'dispatch').mockImplementation(
+      (async (url: any) => {
+        if (url === 'http://coder.test')
+          return makeHandle('coder-task-1', url, [makeCompletedStatusEvent('coder-task-1')]);
+        throw new Error(`Unexpected dispatch to ${url}`);
+      }) as any,
+    );
+
+    // Synthesis LLM turn.
+    priv(foreman).llmClient = {
+      completeWithTools: async function* () {
+        yield { type: 'text_chunk', text: 'Self-plan done.' } as LLMEvent;
+        yield { type: 'stop', stopReason: 'end_turn' } as LLMEvent;
+      },
+    };
+
+    const sendUpdates: string[] = [];
+    vi.spyOn(priv(foreman).acpServer, 'sendUpdate').mockImplementation(
+      (async (_sid: any, content: any) => {
+        for (const block of content as Array<{ type: string; text?: string }>) {
+          if (block.type === 'text' && block.text) sendUpdates.push(block.text);
+        }
+      }) as any,
+    );
+
+    await priv(foreman)._handlePrompt(SESSION_ID, [{ type: 'text', text: 'do something' }]);
+
+    expect(mockPlannerSession.open).toHaveBeenCalledWith('do something');
+    expect(sendUpdates[sendUpdates.length - 1]).toBe('Self-plan done.');
+  });
+});
+
+describe('Foreman integration — no-planner fallback: dispatch_whole', () => {
+  const SESSION_ID = 'fallback-dispatch-whole-session';
+
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it('executes synthetic single-subtask plan when user picks dispatch_whole', async () => {
+    const syntheticPlan = {
+      plan_id: 'synthetic-plan-1',
+      originator_intent: 'do something',
+      goal_summary: 'Dispatching whole task as a single subtask.',
+      source: 'single_task_dispatch',
+      batches: [
+        {
+          batch_id: 'batch-0',
+          subtasks: [
+            {
+              id: 'whole_task',
+              assigned_agent: 'coder',
+              description: 'do something',
+              expected_output: 'Task completed.',
+              inputs: { relevant_files: [], constraints: [], context_from_prior_tasks: [] },
+            },
+          ],
+        },
+      ],
+    };
+
+    const fallbackHandler = makeMockFallbackHandler({ kind: 'dispatch_whole', plan: syntheticPlan as never });
+    const foreman = await buildForemanNoPlanner(fallbackHandler);
+    priv(foreman).sessionManager.create(SESSION_ID, '/tmp');
+
+    vi.spyOn(priv(foreman).dispatchManager, 'dispatch').mockImplementation(
+      (async (url: any) => {
+        if (url === 'http://coder.test')
+          return makeHandle('coder-task-2', url, [makeCompletedStatusEvent('coder-task-2')]);
+        throw new Error(`Unexpected dispatch to ${url}`);
+      }) as any,
+    );
+
+    priv(foreman).llmClient = {
+      completeWithTools: async function* () {
+        yield { type: 'text_chunk', text: 'Dispatch-whole done.' } as LLMEvent;
+        yield { type: 'stop', stopReason: 'end_turn' } as LLMEvent;
+      },
+    };
+
+    const sendUpdates: string[] = [];
+    vi.spyOn(priv(foreman).acpServer, 'sendUpdate').mockImplementation(
+      (async (_sid: any, content: any) => {
+        for (const block of content as Array<{ type: string; text?: string }>) {
+          if (block.type === 'text' && block.text) sendUpdates.push(block.text);
+        }
+      }) as any,
+    );
+
+    await priv(foreman)._handlePrompt(SESSION_ID, [{ type: 'text', text: 'do something' }]);
+
+    expect(sendUpdates.some((u) => u.includes('[coder]'))).toBe(true);
+    expect(sendUpdates[sendUpdates.length - 1]).toBe('Dispatch-whole done.');
   });
 });

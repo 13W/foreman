@@ -63,6 +63,26 @@ export interface PlannerSession {
 // Plan extraction helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Extract plain text from a status event's message parts.
+ * The proxy tunnels ACP agent_message_chunk events as working status-updates
+ * with text in status.message.parts — not as message events.
+ */
+function extractTextFromStatusMessage(event: StreamEvent): string {
+  const data = event.data as Record<string, unknown> | null | undefined;
+  const message = data?.['message'] as Record<string, unknown> | null | undefined;
+  if (!message) return '';
+  const parts = (message['parts'] as unknown[]) ?? [];
+  let result = '';
+  for (const part of parts) {
+    const p = part as Record<string, unknown> | null | undefined;
+    if (p?.['kind'] === 'text' && typeof p['text'] === 'string') {
+      result += p['text'] as string;
+    }
+  }
+  return result;
+}
+
 function tryParsePlanFromText(text: string): Plan | null {
   text = text.trim();
   if (!text) return null;
@@ -239,6 +259,8 @@ export class ExternalPlannerSession implements PlannerSession {
       } else if (event.type === 'artifact') {
         text += extractArtifactText(event);
       } else if (event.type === 'status') {
+        const statusText = extractTextFromStatusMessage(event);
+        if (statusText) text += statusText;
         if (isInputRequired(event)) break;
         if (isTerminalStatus(event)) {
           const fromStatus = tryParsePlanFromStatusEvent(event);
