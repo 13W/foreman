@@ -66,6 +66,7 @@ export const ForemanConfigSchema = z.object({
       level: z.enum(['trace', 'debug', 'info', 'warn', 'error', 'fatal']).default('info'),
       format: z.enum(['json', 'pretty']).default('json'),
       destination: z.enum(['stderr', 'stdout']).default('stderr'),
+      msg_log_file: z.string().optional(),
     })
     .default({ level: 'info', format: 'json', destination: 'stderr' }),
 });

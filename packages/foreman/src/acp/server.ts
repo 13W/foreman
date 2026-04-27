@@ -11,6 +11,7 @@ import type {
   PromptHandler,
   SessionNewHandler,
 } from '@foreman-stack/shared';
+import type { MsgLogger } from '../msg-logger.js';
 
 // Maps our internal permission type to the ACP tool kind
 function acpTypeToToolKind(type: ACPPermissionRequest['type']): 'read' | 'edit' | 'execute' {
@@ -32,6 +33,11 @@ export class DefaultACPAgentServer implements ACPAgentServer {
   private _promptHandler?: PromptHandler;
   private _cancelHandler?: CancelHandler;
   private _conn: AgentSideConnection | null = null;
+  private readonly _msgLogger?: MsgLogger;
+
+  constructor(msgLogger?: MsgLogger) {
+    this._msgLogger = msgLogger;
+  }
 
   onInitialize(handler: InitializeHandler): void {
     this._initHandler = handler;
@@ -52,6 +58,7 @@ export class DefaultACPAgentServer implements ACPAgentServer {
   async sendUpdate(sessionId: string, content: ContentBlock[]): Promise<void> {
     const conn = this._conn;
     if (!conn) throw new Error('DefaultACPAgentServer: not connected — call listen() first');
+    this._msgLogger?.log('out', 'acp', 'agent_message_chunk', content, { sessionId });
     await Promise.all(
       content.map((block) =>
         conn.sessionUpdate({ sessionId, update: { sessionUpdate: 'agent_message_chunk', content: block } }),
@@ -74,6 +81,7 @@ export class DefaultACPAgentServer implements ACPAgentServer {
     ];
     const finalOptions = options ?? defaultOptions;
 
+    this._msgLogger?.log('out', 'acp', 'permission_request', { request, options: finalOptions }, { sessionId });
     const response = await conn.requestPermission({
       sessionId,
       toolCall: {
@@ -85,6 +93,7 @@ export class DefaultACPAgentServer implements ACPAgentServer {
       },
       options: finalOptions,
     });
+    this._msgLogger?.log('in', 'acp', 'permission_response', response, { sessionId });
 
     if (response.outcome.outcome === 'cancelled') {
       return (
@@ -122,6 +131,7 @@ export class DefaultACPAgentServer implements ACPAgentServer {
           },
 
           async prompt(params) {
+            self._msgLogger?.log('in', 'acp', 'prompt', params.prompt, { sessionId: params.sessionId });
             const handler = self._promptHandler;
             if (handler) {
               await handler(params.sessionId, params.prompt);

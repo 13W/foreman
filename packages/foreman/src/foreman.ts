@@ -1,6 +1,7 @@
 import type { ContentBlock } from '@agentclientprotocol/sdk';
 import type { ForemanConfig } from './config.js';
 import { createLogger } from './logger.js';
+import type { MsgLogger } from './msg-logger.js';
 import { DefaultACPAgentServer } from './acp/server.js';
 import { DefaultA2AClient } from './a2a/client.js';
 import { WorkerCatalog, toToolName } from './workers/catalog.js';
@@ -93,6 +94,7 @@ export interface ForemanOpts {
   sessionManager: SessionManager;
   plannerSessionFactory: (options: PlannerSessionOptions) => PlannerSession;
   fallbackHandler?: PlannerFallbackHandler;
+  msgLogger?: MsgLogger;
 }
 
 // ---------------------------------------------------------------------------
@@ -117,8 +119,8 @@ export class Foreman {
   constructor(opts: ForemanOpts) {
     this.config = opts.config;
     this.logger = createLogger(opts.config.logging);
-    this.acpServer = new DefaultACPAgentServer();
-    this.a2aClient = new DefaultA2AClient();
+    this.acpServer = new DefaultACPAgentServer(opts.msgLogger);
+    this.a2aClient = new DefaultA2AClient({ msgLogger: opts.msgLogger });
     this.catalog = new WorkerCatalog(
       this.a2aClient,
       opts.config.runtime.worker_discovery_timeout_sec * 1000,

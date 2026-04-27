@@ -7,6 +7,7 @@ import type { A2AClient, AgentCardMetadata, PermissionDecision, StreamEvent } fr
 import { AgentCardValidationError, DispatchFailedError, TaskNotFoundError } from '@foreman-stack/shared';
 import type { TaskPayload } from '@foreman-stack/shared';
 import { logger } from '../logger.js';
+import type { MsgLogger } from '../msg-logger.js';
 
 type SdkStreamEvent = Message | Task | TaskStatusUpdateEvent | TaskArtifactUpdateEvent;
 
@@ -20,6 +21,7 @@ interface TaskEntry {
 export interface DefaultA2AClientOptions {
   fetchImpl?: typeof fetch;
   agentCardPath?: string;
+  msgLogger?: MsgLogger;
 }
 
 export class DefaultA2AClient implements A2AClient {
@@ -28,6 +30,7 @@ export class DefaultA2AClient implements A2AClient {
   private readonly _clientCache = new Map<string, Client>();
   private readonly _taskRegistry = new Map<string, TaskEntry>();
   private readonly _streamRegistry = new Map<string, AsyncGenerator<SdkStreamEvent>>();
+  private readonly _msgLogger?: MsgLogger;
 
   constructor(options: DefaultA2AClientOptions = {}) {
     this._factory = new ClientFactory(ClientFactoryOptions.default);
@@ -35,6 +38,7 @@ export class DefaultA2AClient implements A2AClient {
       path: options.agentCardPath ?? AGENT_CARD_PATH,
       fetchImpl: options.fetchImpl,
     });
+    this._msgLogger = options.msgLogger;
   }
 
   async fetchAgentCard(url: string): Promise<AgentCardMetadata> {
@@ -57,6 +61,7 @@ export class DefaultA2AClient implements A2AClient {
   }
 
   async dispatchTask(url: string, payload: TaskPayload): Promise<string> {
+    this._msgLogger?.log('out', 'a2a', 'task', payload);
     const client = await this._getOrCreateClient(url);
     const stream = client.sendMessageStream({
       message: {
@@ -82,6 +87,7 @@ export class DefaultA2AClient implements A2AClient {
     const task = firstResult.value as Task;
     this._streamRegistry.set(task.id, stream);
     this._taskRegistry.set(task.id, { client, contextId: task.contextId });
+    this._msgLogger?.log('in', 'a2a', 'task_ack', { taskId: task.id }, { taskId: task.id });
     logger.debug({ taskId: task.id, agentUrl: url }, 'task dispatched');
     return task.id;
   }
@@ -93,7 +99,9 @@ export class DefaultA2AClient implements A2AClient {
 
     try {
       for await (const event of stream) {
-        yield mapSdkEvent(taskId, event as SdkStreamEvent);
+        const mapped = mapSdkEvent(taskId, event as SdkStreamEvent);
+        this._msgLogger?.log('in', 'a2a', mapped.type, mapped, { taskId });
+        yield mapped;
         if (isTerminal(event as SdkStreamEvent)) return;
       }
     } finally {
@@ -118,6 +126,7 @@ export class DefaultA2AClient implements A2AClient {
   }
 
   async respondToPermission(taskId: string, decision: PermissionDecision): Promise<void> {
+    this._msgLogger?.log('out', 'a2a', 'permission_response', decision, { taskId });
     await this.sendFollowUp(taskId, [{ kind: 'data', data: decision }]);
   }
 
