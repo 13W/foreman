@@ -18,7 +18,7 @@ export interface SessionHandle {
   dispose(): Promise<void>;
 }
 
-export type ACPPermissionType = 'fs.read' | 'fs.write' | 'terminal.create';
+export type ACPPermissionType = 'fs.read' | 'fs.write' | 'terminal.create' | 'choice';
 
 export interface ACPPermissionRequest {
   type: ACPPermissionType;
@@ -26,6 +26,8 @@ export interface ACPPermissionRequest {
   path?: string;
   /** Basename of the command — present for terminal.create */
   command?: string;
+  /** Human-readable title for the request */
+  title?: string;
 }
 
 export type PromptEvent =

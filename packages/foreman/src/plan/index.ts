@@ -15,3 +15,7 @@ export {
 export type { PlannerSession, PlannerSessionMode, PlannerSessionOptions } from './planner-session.js';
 
 export { SELF_PLANNED_SYSTEM_PROMPT } from './planner-prompts.js';
+
+export { PlannerFallbackHandler } from './fallback.js';
+export type { FallbackChoice, PlannerFallbackHandlerOptions } from './fallback.js';
+

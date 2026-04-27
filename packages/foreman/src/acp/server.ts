@@ -21,6 +21,8 @@ function acpTypeToToolKind(type: ACPPermissionRequest['type']): 'read' | 'edit' 
       return 'edit';
     case 'terminal.create':
       return 'execute';
+    case 'choice':
+      return 'read'; // Fallback for choice
   }
 }
 
@@ -57,31 +59,41 @@ export class DefaultACPAgentServer implements ACPAgentServer {
     );
   }
 
-  async requestPermission(sessionId: string, request: ACPPermissionRequest): Promise<PermissionOption> {
+  async requestPermission(
+    sessionId: string,
+    request: ACPPermissionRequest,
+    options?: PermissionOption[],
+  ): Promise<PermissionOption> {
     const conn = this._conn;
     if (!conn) throw new Error('DefaultACPAgentServer: not connected — call listen() first');
 
     const toolCallId = randomUUID();
-    const allowOnce: PermissionOption = { optionId: 'allow_once', kind: 'allow_once', name: 'Allow once' };
-    const rejectOnce: PermissionOption = { optionId: 'reject_once', kind: 'reject_once', name: 'Reject' };
+    const defaultOptions: PermissionOption[] = [
+      { optionId: 'allow_once', kind: 'allow_once', name: 'Allow once' },
+      { optionId: 'reject_once', kind: 'reject_once', name: 'Reject' },
+    ];
+    const finalOptions = options ?? defaultOptions;
 
     const response = await conn.requestPermission({
       sessionId,
       toolCall: {
         toolCallId,
         kind: acpTypeToToolKind(request.type),
-        title: request.path ?? request.command ?? request.type,
+        title: request.title ?? request.path ?? request.command ?? request.type,
         rawInput: { path: request.path, command: request.command },
         status: 'pending',
       },
-      options: [allowOnce, rejectOnce],
+      options: finalOptions,
     });
 
     if (response.outcome.outcome === 'cancelled') {
-      return rejectOnce;
+      return (
+        finalOptions.find((o) => o.kind === 'reject_once' || o.kind === 'reject_always') ??
+        finalOptions[0]
+      );
     }
     const { optionId } = response.outcome as { outcome: 'selected'; optionId: string };
-    return [allowOnce, rejectOnce].find((o) => o.optionId === optionId) ?? rejectOnce;
+    return finalOptions.find((o) => o.optionId === optionId) ?? finalOptions[0];
   }
 
   async listen(_transport?: ACPTransport): Promise<void> {

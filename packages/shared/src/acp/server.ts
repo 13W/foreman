@@ -38,8 +38,13 @@ export interface ACPAgentServer {
   /**
    * Request a permission decision from the client for the given session.
    * Resolves with the client's PermissionOption once the user responds.
+   * If options are provided, they are presented to the user instead of the default Allow/Reject.
    */
-  requestPermission(sessionId: string, request: ACPPermissionRequest): Promise<PermissionOption>;
+  requestPermission(
+    sessionId: string,
+    request: ACPPermissionRequest,
+    options?: PermissionOption[],
+  ): Promise<PermissionOption>;
 
   /** Start listening for ACP connections. Defaults to stdio transport. */
   listen(transport?: ACPTransport): Promise<void>;
