@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
-import { createLogger } from './logger.js';
+import { createLogger, configureLevel } from './logger.js';
 import { loadConfig, DEFAULT_CONFIG_PATH } from './config.js';
 import { ProxyServer } from './proxy-server.js';
 import { DefaultA2AServer } from './a2a/server.js';
@@ -39,6 +39,7 @@ try {
   process.exit(1);
 }
 
+configureLevel(config.logging.level);
 const logger = createLogger(config.logging);
 
 logger.info(

@@ -28,3 +28,7 @@ export function createLogger(config?: Partial<LoggingConfig>): pino.Logger {
 }
 
 export const logger = createLogger();
+
+export function configureLevel(level: LogLevel): void {
+  logger.level = level;
+}

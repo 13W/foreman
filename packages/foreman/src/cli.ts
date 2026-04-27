@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
-import { createLogger } from './logger.js';
+import { createLogger, configureLevel } from './logger.js';
 import { loadConfig, DEFAULT_CONFIG_PATH } from './config.js';
 import { Foreman } from './foreman.js';
 import { SessionManager } from './session/manager.js';
@@ -35,6 +35,7 @@ try {
   process.exit(1);
 }
 
+configureLevel(config.logging.level);
 const logger = createLogger(config.logging);
 
 logger.info(
