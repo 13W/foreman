@@ -1,6 +1,8 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Foreman } from './foreman.js';
+import { SessionManager } from './session/manager.js';
+import { SessionState } from './session/state.js';
 import { DispatchHandle } from './workers/task-handle.js';
 import type { StreamEvent, TaskResult, TaskPayload } from '@foreman-stack/shared';
 
@@ -88,7 +90,14 @@ describe('Foreman._runWorkerTask', () => {
   let dispatchSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
-    foreman = new Foreman(minimalConfig as never);
+    const sessionManager = new SessionManager({
+      maxConcurrentSessions: minimalConfig.runtime.max_concurrent_sessions,
+    });
+    foreman = new Foreman({
+      config: minimalConfig as never,
+      sessionManager,
+      plannerSessionFactory: vi.fn(),
+    });
   });
 
   it('parses TaskResult from terminal status message', async () => {
@@ -96,10 +105,12 @@ describe('Foreman._runWorkerTask', () => {
     const handle = makeHandle('task-1', [makeStatusEvent('task-1', expected)]);
     dispatchSpy = vi.spyOn(priv(foreman).dispatchManager, 'dispatch').mockResolvedValue(handle);
 
+    const sessionState = new SessionState('session-1', '/tmp');
     const result = await priv(foreman)._runWorkerTask(
       'http://worker.test',
       {} as TaskPayload,
       'session-1',
+      sessionState,
       undefined,
     );
 
@@ -117,10 +128,12 @@ describe('Foreman._runWorkerTask', () => {
     const handle = makeHandle('task-2', [msgEvent]);
     dispatchSpy = vi.spyOn(priv(foreman).dispatchManager, 'dispatch').mockResolvedValue(handle);
 
+    const sessionState = new SessionState('session-1', '/tmp');
     const result = await priv(foreman)._runWorkerTask(
       'http://worker.test',
       {} as TaskPayload,
       'session-1',
+      sessionState,
       undefined,
     );
 

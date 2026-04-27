@@ -1,0 +1,433 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
+/**
+ * Mock-based integration test for the Foreman orchestrator.
+ * Uses real SessionManager, PlanExecutor, PlannerSession, and Foreman.
+ * Mocks ACPAgentServer (sendUpdate/requestPermission), DispatchManager.dispatch,
+ * and AnthropicLLMClient.completeWithTools to drive controlled scenarios.
+ */
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { Foreman } from './foreman.js';
+import { SessionManager } from './session/manager.js';
+import { createPlannerSession } from './plan/index.js';
+import { DispatchHandle } from './workers/task-handle.js';
+import type { StreamEvent, AgentCardMetadata } from '@foreman-stack/shared';
+import type { LLMEvent } from './llm/client.js';
+
+// Prevent real Anthropic SDK instantiation.
+vi.mock('./llm/anthropic-client.js', () => ({
+  AnthropicLLMClient: vi.fn().mockImplementation(() => ({
+    completeWithTools: vi.fn(),
+  })),
+}));
+
+// ---------------------------------------------------------------------------
+// Config + helpers
+// ---------------------------------------------------------------------------
+
+const BASE_CONFIG = {
+  foreman: { name: 'test-foreman', version: '0.0.1', working_dir: '/tmp' },
+  llm: {
+    backend: 'anthropic' as const,
+    model: 'claude-3-5-haiku-20241022',
+    api_key_env: 'ANTHROPIC_API_KEY',
+    max_tokens_per_turn: 8192,
+  },
+  workers: [
+    { url: 'http://planner.test' },
+    { url: 'http://coder.test' },
+    { url: 'http://tester.test' },
+  ],
+  mcps: { personal: [], injected: [] },
+  runtime: {
+    max_parallel_dispatches: 4,
+    default_task_timeout_sec: 30,
+    worker_discovery_timeout_sec: 5,
+    max_concurrent_sessions: 4,
+    planner_response_timeout_sec: 30,
+  },
+  logging: { level: 'error' as const, format: 'json' as const, destination: 'stderr' as const },
+};
+
+const PLANNER_CARD: AgentCardMetadata = {
+  name: 'planner',
+  url: 'http://planner.test',
+  version: '1.0',
+  skills: [{ id: 'task_decomposition', name: 'Task Decomposition', description: '' }],
+};
+const CODER_CARD: AgentCardMetadata = {
+  name: 'coder',
+  url: 'http://coder.test',
+  version: '1.0',
+  skills: [],
+};
+const TESTER_CARD: AgentCardMetadata = {
+  name: 'tester',
+  url: 'http://tester.test',
+  version: '1.0',
+  skills: [],
+};
+
+function priv(instance: Foreman): any {
+  return instance as any;
+}
+
+function makeHandle(
+  taskId: string,
+  url: string,
+  events: StreamEvent[],
+  cancelFn = vi.fn<[], Promise<void>>().mockResolvedValue(undefined),
+): DispatchHandle {
+  async function* gen() {
+    yield* events;
+  }
+  return new DispatchHandle(taskId, url, gen(), cancelFn);
+}
+
+function makeCompletedStatusEvent(taskId: string): StreamEvent {
+  return {
+    type: 'status',
+    taskId,
+    data: {
+      state: 'completed',
+      final: true,
+      message: {
+        role: 'agent',
+        parts: [
+          {
+            kind: 'data',
+            data: {
+              status: 'completed',
+              stop_reason: 'end_turn',
+              summary: 'done',
+              branch_ref: '',
+              session_transcript_ref: '',
+              error: null,
+            },
+          },
+        ],
+      },
+    },
+    timestamp: '',
+  };
+}
+
+function makePlannerHandle(taskId: string): DispatchHandle {
+  const planData = {
+    plan_id: 'plan-1',
+    originator_intent: 'Refactor auth and add tests',
+    goal_summary: 'Refactor and test',
+    source: 'external_planner',
+    batches: [
+      {
+        batch_id: 'b1',
+        subtasks: [
+          {
+            id: 's1',
+            assigned_agent: 'coder',
+            description: 'Refactor auth module',
+            expected_output: null,
+            inputs: { relevant_files: [], constraints: [], context_from_prior_tasks: [] },
+          },
+          {
+            id: 's2',
+            assigned_agent: 'tester',
+            description: 'Add auth tests',
+            expected_output: null,
+            inputs: { relevant_files: [], constraints: [], context_from_prior_tasks: [] },
+          },
+        ],
+      },
+    ],
+  };
+
+  const event: StreamEvent = {
+    type: 'status',
+    taskId,
+    data: {
+      state: 'completed',
+      final: true,
+      message: {
+        role: 'agent',
+        parts: [{ kind: 'data', data: planData }],
+      },
+    },
+    timestamp: '',
+  };
+
+  return makeHandle(taskId, 'http://planner.test', [event]);
+}
+
+/** Build a Foreman instance with pre-populated catalog (mocked agent cards). */
+async function buildForeman(): Promise<Foreman> {
+  const sessionManager = new SessionManager({
+    maxConcurrentSessions: BASE_CONFIG.runtime.max_concurrent_sessions,
+  });
+
+  const foreman = new Foreman({
+    config: BASE_CONFIG as never,
+    sessionManager,
+    plannerSessionFactory: createPlannerSession,
+  });
+
+  // Pre-populate catalog by mocking fetchAgentCard.
+  vi.spyOn(priv(foreman).a2aClient, 'fetchAgentCard').mockImplementation(
+    async (url: string): Promise<AgentCardMetadata> => {
+      if (url === 'http://planner.test') return PLANNER_CARD;
+      if (url === 'http://coder.test') return CODER_CARD;
+      if (url === 'http://tester.test') return TESTER_CARD;
+      throw new Error(`Unknown agent URL: ${url}`);
+    },
+  );
+  await priv(foreman).catalog.loadFromConfig(BASE_CONFIG.workers);
+
+  // Silence sendUpdate / requestPermission so they don't throw on missing conn.
+  vi.spyOn(priv(foreman).acpServer, 'sendUpdate').mockResolvedValue(undefined);
+  vi.spyOn(priv(foreman).acpServer, 'requestPermission').mockResolvedValue({
+    optionId: 'allow_once',
+    kind: 'allow_once' as const,
+    name: 'Allow once',
+  });
+
+  return foreman;
+}
+
+// ---------------------------------------------------------------------------
+// Happy path
+// ---------------------------------------------------------------------------
+
+describe('Foreman integration — happy path', () => {
+  let foreman: Foreman;
+  const SESSION_ID = 'test-session-1';
+
+  beforeEach(async () => {
+    foreman = await buildForeman();
+    priv(foreman).sessionManager.create(SESSION_ID, '/tmp');
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('executes a 2-subtask plan and sends prefixed transparency updates', async () => {
+    // LLM turns:
+    //  0 — call planner tool
+    //  1 — acknowledge tool result (text only, no further tools)
+    //  2 — synthesis response
+    const llmTurns: LLMEvent[][] = [
+      [
+        { type: 'tool_call', id: 'tc-1', name: 'planner', input: { description: 'Refactor auth and add tests' } },
+        { type: 'stop', stopReason: 'tool_use' },
+      ],
+      [
+        { type: 'stop', stopReason: 'end_turn' },
+      ],
+      [
+        { type: 'text_chunk', text: 'Done.' },
+        { type: 'stop', stopReason: 'end_turn' },
+      ],
+    ];
+    let llmTurnIdx = 0;
+    vi.spyOn(priv(foreman).llmClient, 'completeWithTools').mockImplementation(async function* () {
+      const events = llmTurns[llmTurnIdx++] ?? [];
+      for (const e of events) yield e;
+    });
+
+    // Dispatch mock: planner → plan; coder + tester → success.
+    vi.spyOn(priv(foreman).dispatchManager, 'dispatch').mockImplementation(
+      async (url: string): Promise<DispatchHandle> => {
+        if (url === 'http://planner.test') return makePlannerHandle('planner-task-1');
+        if (url === 'http://coder.test') return makeHandle('coder-task-1', url, [makeCompletedStatusEvent('coder-task-1')]);
+        if (url === 'http://tester.test') return makeHandle('tester-task-1', url, [makeCompletedStatusEvent('tester-task-1')]);
+        throw new Error(`Unexpected dispatch to ${url}`);
+      },
+    );
+
+    // Capture sendUpdate calls.
+    const sendUpdates: string[] = [];
+    vi.spyOn(priv(foreman).acpServer, 'sendUpdate').mockImplementation(
+      async (_sid: string, content: Array<{ type: string; text?: string }>) => {
+        for (const block of content) {
+          if (block.type === 'text' && block.text) sendUpdates.push(block.text);
+        }
+      },
+    );
+
+    await priv(foreman)._handlePrompt(SESSION_ID, [
+      { type: 'text', text: 'Refactor auth and add tests' },
+    ]);
+
+    // [planner] prefix must appear.
+    expect(sendUpdates.some((u) => u.includes('[planner]'))).toBe(true);
+    // [coder] and [tester] prefixes must appear.
+    expect(sendUpdates.some((u) => u.includes('[coder]'))).toBe(true);
+    expect(sendUpdates.some((u) => u.includes('[tester]'))).toBe(true);
+    // "Done." is the final synthesis update.
+    expect(sendUpdates[sendUpdates.length - 1]).toBe('Done.');
+    // [planner] appears before [coder] and [tester].
+    const plannerIdx = sendUpdates.findIndex((u) => u.includes('[planner]'));
+    const coderIdx = sendUpdates.findIndex((u) => u.includes('[coder]'));
+    const testerIdx = sendUpdates.findIndex((u) => u.includes('[tester]'));
+    expect(plannerIdx).toBeLessThan(coderIdx);
+    expect(plannerIdx).toBeLessThan(testerIdx);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Cancellation
+// ---------------------------------------------------------------------------
+
+describe('Foreman integration — cancel mid-execution', () => {
+  let foreman: Foreman;
+  const SESSION_ID = 'cancel-session';
+
+  beforeEach(async () => {
+    foreman = await buildForeman();
+    priv(foreman).sessionManager.create(SESSION_ID, '/tmp');
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('closing the session cancels active dispatch handles', async () => {
+    const cancelFn = vi.fn<[], Promise<void>>().mockResolvedValue(undefined);
+    const slowHandle = makeHandle(
+      'slow-task',
+      'http://coder.test',
+      [makeCompletedStatusEvent('slow-task')],
+      cancelFn,
+    );
+
+    // Register handle directly in sessionState to simulate mid-execution.
+    const state = priv(foreman).sessionManager.get(SESSION_ID);
+    state.activeDispatchHandles.set('slow-task', slowHandle);
+
+    await priv(foreman)._handleCancel(SESSION_ID);
+
+    expect(cancelFn).toHaveBeenCalled();
+    // Session should be removed from the manager.
+    expect(priv(foreman).sessionManager.get(SESSION_ID)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Permission escalation — plan owner resolves directly
+// ---------------------------------------------------------------------------
+
+describe('Foreman integration — plan owner resolves permission', () => {
+  let foreman: Foreman;
+  const SESSION_ID = 'escalation-session-1';
+
+  beforeEach(async () => {
+    foreman = await buildForeman();
+    priv(foreman).sessionManager.create(SESSION_ID, '/tmp');
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('plan owner answers with valid JSON decision — no user permission requested', async () => {
+    // Stub a plannerSession that resolves permission without user involvement.
+    const mockPlannerSession = {
+      mode: 'external_planner' as const,
+      taskId: 'planner-task-x',
+      open: vi.fn(),
+      ask: vi.fn().mockResolvedValue('{"kind":"allow_once"}'),
+      close: vi.fn().mockResolvedValue(undefined),
+      getPlan: vi.fn().mockReturnValue(null),
+    };
+    priv(foreman)._plannerSessions.set(SESSION_ID, mockPlannerSession);
+
+    const requestPermSpy = vi.spyOn(priv(foreman).acpServer, 'requestPermission');
+    const respondSpy = vi
+      .spyOn(priv(foreman).a2aClient, 'respondToPermission')
+      .mockResolvedValue(undefined);
+
+    await priv(foreman)._handleWorkerEscalation(
+      'worker-task-1',
+      { type: 'fs.write', path: '/tmp/foo.ts', message: 'Write file' },
+      SESSION_ID,
+    );
+
+    // Plan owner answered directly — user should NOT have been asked.
+    expect(requestPermSpy).not.toHaveBeenCalled();
+    expect(respondSpy).toHaveBeenCalledWith('worker-task-1', { kind: 'allow_once' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Permission escalation — plan owner defers to user
+// ---------------------------------------------------------------------------
+
+describe('Foreman integration — plan owner defers to user', () => {
+  let foreman: Foreman;
+  const SESSION_ID = 'escalation-session-2';
+
+  beforeEach(async () => {
+    foreman = await buildForeman();
+    priv(foreman).sessionManager.create(SESSION_ID, '/tmp');
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('plan owner returns "ask_user" — falls back to user permission request', async () => {
+    const mockPlannerSession = {
+      mode: 'external_planner' as const,
+      taskId: 'planner-task-y',
+      open: vi.fn(),
+      ask: vi.fn().mockResolvedValue('ask_user'),
+      close: vi.fn().mockResolvedValue(undefined),
+      getPlan: vi.fn().mockReturnValue(null),
+    };
+    priv(foreman)._plannerSessions.set(SESSION_ID, mockPlannerSession);
+
+    const requestPermSpy = vi
+      .spyOn(priv(foreman).acpServer, 'requestPermission')
+      .mockResolvedValue({ optionId: 'reject_once', kind: 'reject_once' as const, name: 'Reject' });
+    const respondSpy = vi
+      .spyOn(priv(foreman).a2aClient, 'respondToPermission')
+      .mockResolvedValue(undefined);
+
+    await priv(foreman)._handleWorkerEscalation(
+      'worker-task-2',
+      { type: 'terminal.create', command: 'rm', message: 'Remove file' },
+      SESSION_ID,
+    );
+
+    // User WAS asked.
+    expect(requestPermSpy).toHaveBeenCalledWith(SESSION_ID, expect.objectContaining({ type: 'terminal.create' }));
+    // Response routed back to worker.
+    expect(respondSpy).toHaveBeenCalledWith('worker-task-2', { kind: 'reject_once' });
+  });
+
+  it('plan owner throws — falls back to user permission request', async () => {
+    const mockPlannerSession = {
+      mode: 'external_planner' as const,
+      taskId: 'planner-task-z',
+      open: vi.fn(),
+      ask: vi.fn().mockRejectedValue(new Error('planner timeout')),
+      close: vi.fn().mockResolvedValue(undefined),
+      getPlan: vi.fn().mockReturnValue(null),
+    };
+    priv(foreman)._plannerSessions.set(SESSION_ID, mockPlannerSession);
+
+    const requestPermSpy = vi
+      .spyOn(priv(foreman).acpServer, 'requestPermission')
+      .mockResolvedValue({ optionId: 'allow_once', kind: 'allow_once' as const, name: 'Allow once' });
+    const respondSpy = vi
+      .spyOn(priv(foreman).a2aClient, 'respondToPermission')
+      .mockResolvedValue(undefined);
+
+    await priv(foreman)._handleWorkerEscalation(
+      'worker-task-3',
+      { type: 'fs.read', path: '/secret', message: 'Read file' },
+      SESSION_ID,
+    );
+
+    expect(requestPermSpy).toHaveBeenCalled();
+    expect(respondSpy).toHaveBeenCalledWith('worker-task-3', { kind: 'allow_once' });
+  });
+});

@@ -25,6 +25,7 @@ export class SessionState {
   pendingPermissionRequests: Map<string, PermissionRequestRecord>;
   planOwnerRef: PlanOwnerRef | null;
   activePlan: Plan | null;
+  abortController: AbortController | null;
 
   constructor(sessionId: string, cwd: string) {
     this.sessionId = sessionId;
@@ -35,5 +36,6 @@ export class SessionState {
     this.pendingPermissionRequests = new Map();
     this.planOwnerRef = null;
     this.activePlan = null;
+    this.abortController = null;
   }
 }

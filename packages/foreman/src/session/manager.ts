@@ -47,4 +47,8 @@ export class SessionManager {
   size(): number {
     return this._sessions.size;
   }
+
+  getAllSessionIds(): string[] {
+    return [...this._sessions.keys()];
+  }
 }

@@ -29,6 +29,9 @@ export interface PlannerSessionOptions {
 export interface PlannerSession {
   readonly mode: PlannerSessionMode;
 
+  /** Task ID assigned by the planner backend. Null for self_planned/single_task_dispatch. */
+  readonly taskId: string | null;
+
   /**
    * Initialize the session.
    * External: dispatch the decomposition request and wait for the plan.
@@ -138,6 +141,8 @@ export class ExternalPlannerSession implements PlannerSession {
   private _taskId: string | null = null;
   private _plan: Plan | null = null;
   private _closed = false;
+
+  get taskId(): string | null { return this._taskId; }
 
   private readonly _logger: Logger;
   private readonly _timeoutMs: number;
@@ -264,6 +269,7 @@ export class ExternalPlannerSession implements PlannerSession {
  */
 export class SelfPlannedSession implements PlannerSession {
   readonly mode: PlannerSessionMode = 'self_planned';
+  readonly taskId: string | null = null;
 
   private _history: Message[] = [];
   private _plan: Plan | null = null;
@@ -337,6 +343,7 @@ export class SelfPlannedSession implements PlannerSession {
 /** No plan owner. open/close are no-ops; ask() always throws. */
 export class SingleTaskDispatchSession implements PlannerSession {
   readonly mode: PlannerSessionMode = 'single_task_dispatch';
+  readonly taskId: string | null = null;
 
   async open(_decompositionRequest: string): Promise<void> {
     // no-op

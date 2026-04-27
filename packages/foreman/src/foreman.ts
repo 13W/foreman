@@ -6,7 +6,6 @@ import { DefaultA2AClient } from './a2a/client.js';
 import { WorkerCatalog, toToolName } from './workers/catalog.js';
 import type { WorkerCatalogEntry } from './workers/catalog.js';
 import { DispatchManager } from './workers/dispatch-manager.js';
-import type { DispatchHandle } from './workers/task-handle.js';
 import {
   isPermissionEvent,
   extractPermissionRequest,
@@ -18,9 +17,9 @@ import { AnthropicLLMClient } from './llm/anthropic-client.js';
 import { LLMLoop } from './llm/loop.js';
 import { ToolRegistry } from './llm/tool-registry.js';
 import { buildForemanSystemPrompt } from './llm/prompts.js';
-import { Plan } from '@foreman-stack/shared';
 import type {
   Plan as PlanType,
+  PermissionDecision,
   PermissionRequest,
   StreamEvent,
   TaskPayload,
@@ -28,7 +27,10 @@ import type {
 } from '@foreman-stack/shared';
 import { mapPermissionOptionToDecision } from './permissions/mapper.js';
 import { PlanAbortedError, PlanExecutor } from './plan/index.js';
-import { SessionState } from './session/state.js';
+import type { PlannerSession, PlannerSessionOptions } from './plan/index.js';
+import { SessionManager } from './session/manager.js';
+import { SessionLimitError } from './session/errors.js';
+import type { SessionState } from './session/state.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -56,6 +58,42 @@ function buildWorkerList(workers: WorkerCatalogEntry[]): string {
   return workers.map((w) => `- ${toToolName(w)}: ${buildWorkerDescription(w)}`).join('\n');
 }
 
+/**
+ * Parse a PermissionDecision from planner answer text.
+ * Returns null if the text is unparseable, empty, or contains "ask_user"/"ask user".
+ */
+function tryParsePermissionDecision(text: string): PermissionDecision | null {
+  const lower = text.trim().toLowerCase();
+  if (!lower || lower.includes('ask_user') || lower.includes('ask user')) return null;
+
+  const candidates = [text.trim(), text.match(/\{[^}]*\}/)?.[0] ?? ''];
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    try {
+      const parsed = JSON.parse(candidate) as { kind?: string };
+      if (
+        typeof parsed.kind === 'string' &&
+        ['allow_once', 'allow_always', 'reject_once', 'reject_always'].includes(parsed.kind)
+      ) {
+        return { kind: parsed.kind as PermissionDecision['kind'] };
+      }
+    } catch {
+      // not JSON — try next candidate
+    }
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// ForemanOpts
+// ---------------------------------------------------------------------------
+
+export interface ForemanOpts {
+  config: ForemanConfig;
+  sessionManager: SessionManager;
+  plannerSessionFactory: (options: PlannerSessionOptions) => PlannerSession;
+}
+
 // ---------------------------------------------------------------------------
 // Foreman
 // ---------------------------------------------------------------------------
@@ -68,25 +106,28 @@ export class Foreman {
   private readonly catalog: WorkerCatalog;
   private readonly dispatchManager: DispatchManager;
   private readonly llmClient: AnthropicLLMClient;
+  private readonly sessionManager: SessionManager;
+  private readonly plannerSessionFactory: (options: PlannerSessionOptions) => PlannerSession;
 
-  // TODO(t4.4): SessionManager will track concurrent sessions and enforce max_concurrent_sessions limit.
-  private _activeHandles = new Map<string, DispatchHandle>();
-  private _activeController: AbortController | null = null;
+  /** Active PlannerSessions by ACP sessionId — kept alive during plan execution for escalation. */
+  private readonly _plannerSessions = new Map<string, PlannerSession>();
 
-  constructor(config: ForemanConfig) {
-    this.config = config;
-    this.logger = createLogger(config.logging);
+  constructor(opts: ForemanOpts) {
+    this.config = opts.config;
+    this.logger = createLogger(opts.config.logging);
     this.acpServer = new DefaultACPAgentServer();
     this.a2aClient = new DefaultA2AClient();
     this.catalog = new WorkerCatalog(
       this.a2aClient,
-      config.runtime.worker_discovery_timeout_sec * 1000,
+      opts.config.runtime.worker_discovery_timeout_sec * 1000,
     );
     this.dispatchManager = new DispatchManager(
       this.a2aClient,
-      config.runtime.max_parallel_dispatches,
+      opts.config.runtime.max_parallel_dispatches,
     );
-    this.llmClient = new AnthropicLLMClient(config);
+    this.llmClient = new AnthropicLLMClient(opts.config);
+    this.sessionManager = opts.sessionManager;
+    this.plannerSessionFactory = opts.plannerSessionFactory;
   }
 
   async start(): Promise<void> {
@@ -101,6 +142,7 @@ export class Foreman {
 
     acpServer.onSessionNew((sessionId) => {
       logger.info({ sessionId }, 'ACP session/new received');
+      this._handleSessionNew(sessionId);
     });
 
     acpServer.onPrompt(async (sessionId, content) => {
@@ -119,11 +161,40 @@ export class Foreman {
 
   async shutdown(): Promise<void> {
     this.logger.info('Foreman shutting down');
-    this._activeController?.abort();
-    for (const handle of this._activeHandles.values()) {
-      await handle.cancel().catch(() => {});
+
+    const sessionIds = this.sessionManager.getAllSessionIds();
+    for (const sessionId of sessionIds) {
+      const state = this.sessionManager.get(sessionId);
+      state?.abortController?.abort();
+
+      const plannerSession = this._plannerSessions.get(sessionId);
+      if (plannerSession) {
+        await plannerSession.close().catch((err) =>
+          this.logger.warn({ sessionId, err: String(err) }, 'planner session close error during shutdown'),
+        );
+        this._plannerSessions.delete(sessionId);
+      }
+
+      await this.sessionManager.close(sessionId).catch((err) =>
+        this.logger.warn({ sessionId, err: String(err) }, 'session close error during shutdown'),
+      );
     }
-    this._activeHandles.clear();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Session lifecycle
+  // ---------------------------------------------------------------------------
+
+  private _handleSessionNew(sessionId: string): void {
+    try {
+      this.sessionManager.create(sessionId, process.cwd());
+    } catch (err) {
+      if (err instanceof SessionLimitError) {
+        this.logger.warn({ sessionId, limit: err.limit }, 'session limit reached; session not created');
+      } else {
+        this.logger.error({ sessionId, err: String(err) }, 'unexpected error creating session');
+      }
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -131,6 +202,14 @@ export class Foreman {
   // ---------------------------------------------------------------------------
 
   private async _handlePrompt(sessionId: string, content: ContentBlock[]): Promise<void> {
+    const sessionState = this.sessionManager.get(sessionId);
+    if (!sessionState) {
+      await this.acpServer.sendUpdate(sessionId, [
+        { type: 'text', text: 'Session not found. Please start a new session.' },
+      ]);
+      return;
+    }
+
     await this.catalog.recheckUnreachable();
 
     const available = this.catalog.getAvailable();
@@ -146,10 +225,7 @@ export class Foreman {
 
     const userText = extractTextFromContent(content);
     const registry = new ToolRegistry();
-
-    // Workers are write tools. Escalation is handled at the A2A stream level (see _handleWorkerEscalation).
-    // The ToolRegistry escalation gate is bypassed here — permissions are routed directly to the user per
-    // the iteration-1 design. TODO(t4.7-full): Worker permission escalations route to plan owner first.
+    // Escalation gate bypassed; escalation is handled at the A2A stream level.
     registry.setEscalationCallback(async () => true);
 
     let capturedPlan: PlanType | null = null;
@@ -159,94 +235,179 @@ export class Foreman {
       const isPlanner = this.catalog.isPlanner(worker);
       this.logger.debug({ toolName, isPlanner }, 'Registering worker tool');
 
-      registry.register(
-        toolName,
-        {
-          name: toolName,
-          description: buildWorkerDescription(worker),
-          inputSchema: {
-            type: 'object',
-            properties: {
-              description: {
-                type: 'string',
-                description: 'Task description to dispatch to this worker.',
+      if (isPlanner) {
+        const plannerName = worker.agent_card?.name ?? worker.name_hint ?? toolName;
+        const plannerUrl = worker.url;
+
+        registry.register(
+          toolName,
+          {
+            name: toolName,
+            description: buildWorkerDescription(worker),
+            inputSchema: {
+              type: 'object',
+              properties: {
+                description: { type: 'string', description: 'Task description for decomposition.' },
               },
-              expected_output: {
-                type: 'string',
-                description: 'Expected output description (optional).',
-              },
+              required: ['description'],
             },
-            required: ['description'],
           },
-        },
-        async (args, signal) => {
-          const payload: TaskPayload = {
-            description: String(args['description'] ?? ''),
-            expected_output:
-              typeof args['expected_output'] === 'string' ? args['expected_output'] : null,
-            inputs: { relevant_files: [], constraints: [], context_from_prior_tasks: [] },
-            originator_intent: userText,
-            max_delegation_depth: 3,
-            parent_task_id: null,
-            base_branch: null,
-            timeout_sec: this.config.runtime.default_task_timeout_sec,
-            injected_mcps: [],
-          };
+          async (_args, _signal) => {
+            const plannerSession = this.plannerSessionFactory({
+              mode: 'external_planner',
+              dispatchManager: this.dispatchManager,
+              a2aClient: this.a2aClient,
+              plannerUrl,
+              config: this.config,
+              logger: this.logger,
+            });
+            this._plannerSessions.set(sessionId, plannerSession);
+            sessionState.planOwnerRef = { kind: 'external', taskId: '' };
 
-          const taskResult = await this._runWorkerTask(worker.url, payload, sessionId, signal);
-          const resultStr = JSON.stringify(taskResult);
+            await this.acpServer.sendUpdate(sessionId, [
+              { type: 'text', text: `[${plannerName}] starting...` },
+            ]);
+            this.logger.debug({ plannerUrl, sessionId }, 'opening planner session');
 
-          if (isPlanner) {
-            try {
-              const parsed = Plan.safeParse(JSON.parse(taskResult.summary));
-              if (parsed.success) {
-                capturedPlan = parsed.data;
-                return 'Plan received. Executing subtasks.';
-              }
-            } catch {
-              // Not valid JSON plan — return raw result string
+            await plannerSession.open(userText);
+
+            const plan = plannerSession.getPlan();
+            sessionState.planOwnerRef = {
+              kind: 'external',
+              taskId: plannerSession.taskId ?? '',
+            };
+
+            await this.acpServer.sendUpdate(sessionId, [
+              { type: 'text', text: `[${plannerName}] done.` },
+            ]);
+
+            if (plan) {
+              capturedPlan = plan;
+              sessionState.activePlan = plan;
+              return 'Plan received. Executing subtasks.';
             }
-          }
-
-          return resultStr;
-        },
-        { forceWrite: true },
-      );
+            return 'Planner did not return a valid plan.';
+          },
+          { forceWrite: true },
+        );
+      } else {
+        registry.register(
+          toolName,
+          {
+            name: toolName,
+            description: buildWorkerDescription(worker),
+            inputSchema: {
+              type: 'object',
+              properties: {
+                description: { type: 'string', description: 'Task description.' },
+                expected_output: { type: 'string', description: 'Expected output (optional).' },
+              },
+              required: ['description'],
+            },
+          },
+          async (args, signal) => {
+            const payload: TaskPayload = {
+              description: String(args['description'] ?? ''),
+              expected_output:
+                typeof args['expected_output'] === 'string' ? args['expected_output'] : null,
+              inputs: { relevant_files: [], constraints: [], context_from_prior_tasks: [] },
+              originator_intent: userText,
+              max_delegation_depth: 3,
+              parent_task_id: null,
+              base_branch: null,
+              timeout_sec: this.config.runtime.default_task_timeout_sec,
+              injected_mcps: [],
+            };
+            const taskResult = await this._runWorkerTask(
+              worker.url,
+              payload,
+              sessionId,
+              sessionState,
+              signal,
+            );
+            return JSON.stringify(taskResult);
+          },
+          { forceWrite: true },
+        );
+      }
     }
 
     const systemPrompt = buildForemanSystemPrompt(buildWorkerList(available));
-    const messages = [
-      { role: 'user' as const, content: [{ type: 'text' as const, text: userText }] },
-    ];
+    const userMsg = {
+      role: 'user' as const,
+      content: [{ type: 'text' as const, text: userText }],
+    };
+    const messages = [...sessionState.conversationHistory, userMsg];
 
-    this._activeController = new AbortController();
+    sessionState.abortController = new AbortController();
     const loop = new LLMLoop(this.llmClient, registry);
     let finalText = '';
 
     try {
-      for await (const event of loop.run(messages, systemPrompt, this._activeController.signal)) {
+      // Drive the generator manually to capture the return value (updated history).
+      const gen = loop.run(messages, systemPrompt, sessionState.abortController.signal);
+      while (true) {
+        const result = await gen.next();
+        if (result.done) {
+          sessionState.conversationHistory = result.value;
+          break;
+        }
+        const event = result.value;
         if (event.type === 'text_chunk') {
           finalText += event.text;
         } else if (event.type === 'stop' && event.stopReason === 'tool_use') {
-          // A new LLM turn follows; discard intermediate text accumulated so far.
           finalText = '';
         }
       }
     } finally {
-      this._activeController = null;
+      sessionState.abortController = null;
     }
 
     if (capturedPlan) {
-      const ephemeralState = new SessionState(sessionId, process.cwd());
+      // Build subtask → human worker name map for transparency updates.
+      const subtaskWorkerNames = new Map<string, string>();
+      for (const batch of capturedPlan.batches) {
+        for (const subtask of batch.subtasks) {
+          const worker = available.find(
+            (w) =>
+              toToolName(w) === subtask.assigned_agent ||
+              w.agent_card?.name === subtask.assigned_agent,
+          );
+          subtaskWorkerNames.set(
+            subtask.id,
+            worker?.agent_card?.name ?? subtask.assigned_agent,
+          );
+        }
+      }
+      const seenSubtasks = new Set<string>();
+
       const executor = new PlanExecutor({
         dispatchManager: this.dispatchManager,
         catalog: this.catalog,
-        sessionState: ephemeralState,
+        sessionState,
         config: this.config,
         logger: this.logger,
-        // TODO(t4.7-full): Route escalations to plan owner first; for now, escalate directly to user.
         onWorkerEscalation: async (taskId, request) => {
           await this._handleWorkerEscalation(taskId, request, sessionId);
+        },
+        onSubtaskEvent: (subtaskId, event) => {
+          const workerName = subtaskWorkerNames.get(subtaskId) ?? subtaskId;
+          if (!seenSubtasks.has(subtaskId)) {
+            seenSubtasks.add(subtaskId);
+            this.acpServer
+              .sendUpdate(sessionId, [{ type: 'text', text: `[${workerName}] starting...` }])
+              .catch((err: unknown) =>
+                this.logger.warn({ err: String(err) }, 'transparency send failed'),
+              );
+          }
+          const update = this._transparencyText(workerName, event);
+          if (update) {
+            this.acpServer
+              .sendUpdate(sessionId, [{ type: 'text', text: update }])
+              .catch((err: unknown) =>
+                this.logger.warn({ err: String(err) }, 'transparency send failed'),
+              );
+          }
         },
       });
 
@@ -259,16 +420,28 @@ export class Foreman {
       } catch (err) {
         let failureInfo: string;
         if (err instanceof PlanAbortedError) {
-          const detail = err.taskResult.error?.message ?? err.taskResult.stop_reason ?? err.taskResult.status;
+          const detail =
+            err.taskResult.error?.message ?? err.taskResult.stop_reason ?? err.taskResult.status;
           failureInfo = `Subtask "${err.subtaskId}" failed: ${detail}`;
         } else {
-          const msg = err instanceof Error ? err.message : String(err);
-          failureInfo = `Plan execution failed: ${msg}`;
+          failureInfo = `Plan execution failed: ${err instanceof Error ? err.message : String(err)}`;
         }
         const summary = await this._synthesize([failureInfo], userText);
         await this.acpServer.sendUpdate(sessionId, [{ type: 'text', text: summary }]);
         return;
+      } finally {
+        // Always close plannerSession after plan execution.
+        const plannerSession = this._plannerSessions.get(sessionId);
+        if (plannerSession) {
+          await plannerSession.close().catch((err: unknown) =>
+            this.logger.warn({ err: String(err) }, 'planner session close error'),
+          );
+          this._plannerSessions.delete(sessionId);
+        }
+        sessionState.activePlan = null;
+        sessionState.planOwnerRef = null;
       }
+
       const summary = await this._synthesize(results, userText);
       await this.acpServer.sendUpdate(sessionId, [{ type: 'text', text: summary }]);
     } else if (finalText) {
@@ -277,17 +450,18 @@ export class Foreman {
   }
 
   // ---------------------------------------------------------------------------
-  // Worker task dispatch
+  // Worker task dispatch (non-planner, LLM tool path)
   // ---------------------------------------------------------------------------
 
   private async _runWorkerTask(
     url: string,
     payload: TaskPayload,
     sessionId: string,
+    sessionState: SessionState,
     signal?: AbortSignal,
   ): Promise<TaskResultType> {
     const handle = await this.dispatchManager.dispatch(url, payload);
-    this._activeHandles.set(handle.taskId, handle);
+    sessionState.activeDispatchHandles.set(handle.taskId, handle);
 
     try {
       let structuredResult: TaskResultType | null = null;
@@ -320,7 +494,6 @@ export class Foreman {
 
       if (structuredResult) return structuredResult;
 
-      // Fallback: wrap unstructured output as a completed TaskResult.
       return {
         status: 'completed',
         stop_reason: 'end_turn',
@@ -330,21 +503,44 @@ export class Foreman {
         error: null,
       };
     } finally {
-      this._activeHandles.delete(handle.taskId);
+      sessionState.activeDispatchHandles.delete(handle.taskId);
     }
   }
 
   // ---------------------------------------------------------------------------
-  // Worker escalation (iteration 1: direct to user)
+  // Worker escalation — plan-owner-first routing (foreman-spec 6.7 variant C)
   // ---------------------------------------------------------------------------
 
-  // TODO(t4.7-full): Worker permission escalations route to plan owner first; for now, escalate directly to user.
-  // TODO(t4.6): PlannerSessionManager will keep planner alive for stateful escalation routing.
   private async _handleWorkerEscalation(
     taskId: string,
     request: PermissionRequest,
     sessionId: string,
   ): Promise<void> {
+    const plannerSession = this._plannerSessions.get(sessionId);
+
+    if (plannerSession) {
+      try {
+        const question =
+          `Worker task ${taskId} requests permission: ${request.type}` +
+          (request.path ? ` path="${request.path}"` : '') +
+          (request.command ? ` command="${request.command}"` : '') +
+          (request.message ? `. ${request.message}` : '') +
+          ' Respond with a JSON PermissionDecision (e.g. {"kind":"allow_once"}) or say "ask_user" to escalate to the user.';
+
+        const answer = await plannerSession.ask(question);
+        const decision = tryParsePermissionDecision(answer);
+        if (decision) {
+          this.logger.debug({ taskId, decision: decision.kind }, 'plan owner resolved permission');
+          await this.a2aClient.respondToPermission(taskId, decision);
+          return;
+        }
+        this.logger.debug({ taskId }, 'plan owner deferred permission to user');
+      } catch (err) {
+        this.logger.warn({ taskId, err: String(err) }, 'plan owner ask failed; escalating to user');
+      }
+    }
+
+    // Fallback: ask user directly.
     const option = await this.acpServer.requestPermission(sessionId, {
       type: request.type,
       path: request.path,
@@ -352,6 +548,27 @@ export class Foreman {
     });
     const decision = mapPermissionOptionToDecision(option);
     await this.a2aClient.respondToPermission(taskId, decision);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Transparency text extraction (foreman-spec 5.2)
+  // ---------------------------------------------------------------------------
+
+  private _transparencyText(workerName: string, event: StreamEvent): string | null {
+    if (event.type === 'message') {
+      const text = extractMessageText(event);
+      if (text) return `[${workerName}] ${text}`;
+    } else if (event.type === 'status') {
+      const data = event.data as Record<string, unknown> | null | undefined;
+      const state = data?.['state'] as string | undefined;
+      if (data?.['final'] && state === 'completed') {
+        return `[${workerName}] done.`;
+      }
+      if (state && ['failed', 'canceled', 'rejected'].includes(state)) {
+        return `[${workerName}] failed: ${state}`;
+      }
+    }
+    return null;
   }
 
   // ---------------------------------------------------------------------------
@@ -392,14 +609,22 @@ export class Foreman {
   // Cancel handler
   // ---------------------------------------------------------------------------
 
-  private async _handleCancel(_sessionId: string): Promise<void> {
-    this._activeController?.abort();
-    // TODO(t4.4): SessionManager will track concurrent sessions and enforce max_concurrent_sessions limit.
-    for (const handle of this._activeHandles.values()) {
-      await handle.cancel().catch((err: unknown) => {
-        this.logger.warn({ taskId: handle.taskId, err: String(err) }, 'cancel failed');
-      });
+  private async _handleCancel(sessionId: string): Promise<void> {
+    const state = this.sessionManager.get(sessionId);
+    if (state) {
+      state.abortController?.abort();
     }
-    this._activeHandles.clear();
+
+    // Close plannerSession first — it may be awaiting a follow-up.
+    const plannerSession = this._plannerSessions.get(sessionId);
+    if (plannerSession) {
+      await plannerSession.close().catch((err: unknown) =>
+        this.logger.warn({ sessionId, err: String(err) }, 'planner session close on cancel'),
+      );
+      this._plannerSessions.delete(sessionId);
+    }
+
+    // SessionManager.close cascades to active dispatch handles.
+    await this.sessionManager.close(sessionId);
   }
 }

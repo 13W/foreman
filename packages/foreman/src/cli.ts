@@ -3,6 +3,8 @@ import { parseArgs } from 'node:util';
 import { createLogger } from './logger.js';
 import { loadConfig, DEFAULT_CONFIG_PATH } from './config.js';
 import { Foreman } from './foreman.js';
+import { SessionManager } from './session/manager.js';
+import { createPlannerSession } from './plan/index.js';
 
 const { values } = parseArgs({
   options: {
@@ -40,7 +42,16 @@ logger.info(
   'Starting foreman',
 );
 
-const foreman = new Foreman(config);
+const sessionManager = new SessionManager({
+  maxConcurrentSessions: config.runtime.max_concurrent_sessions,
+  logger,
+});
+
+const foreman = new Foreman({
+  config,
+  sessionManager,
+  plannerSessionFactory: createPlannerSession,
+});
 let shuttingDown = false;
 
 async function gracefulShutdown(signal: string): Promise<void> {
