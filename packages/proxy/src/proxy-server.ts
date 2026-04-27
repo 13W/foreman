@@ -158,7 +158,13 @@ export class ProxyServer {
       );
     }
 
-    log.info({ status: result.status, stopReason: result.stop_reason }, 'task completed');
+    if (result.status === 'completed') {
+      log.info({ stopReason: result.stop_reason }, 'task finished: completed');
+    } else if (result.status === 'cancelled') {
+      log.warn({ stopReason: result.stop_reason }, 'task finished: cancelled');
+    } else {
+      log.error({ stopReason: result.stop_reason, error: result.error }, 'task finished: failed');
+    }
     await this.a2aServer.completeTask(taskId, result);
   }
 
