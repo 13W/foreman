@@ -158,24 +158,33 @@ export class DefaultACPClientManager implements ACPClientManager {
     const connection = new ClientSideConnection(
       (_agent): Client => ({
         async sessionUpdate(params) {
-          logger.debug({ sessionId: params.sessionId }, 'ACP sessionUpdate received');
+          const update = params.update as SessionUpdate;
+          const updateType = update.sessionUpdate;
           const queue = self.sessionQueues.get(params.sessionId);
           if (!queue) {
-            logger.warn({ sessionId: params.sessionId }, 'ACP sessionUpdate received for unknown session');
+            logger.warn({ sessionId: params.sessionId, updateType }, 'ACP sessionUpdate received for unknown session');
             return;
           }
-          const update = params.update as SessionUpdate;
 
           if (update.sessionUpdate === 'agent_message_chunk') {
-            queue.push({ kind: 'agent_message_chunk', content: (update as ContentChunk).content });
+            const chunk = update as ContentChunk;
+            const preview = typeof chunk.content === 'string' ? chunk.content.slice(0, 80) : undefined;
+            logger.debug({ sessionId: params.sessionId, updateType, preview }, 'ACP sessionUpdate received');
+            queue.push({ kind: 'agent_message_chunk', content: chunk.content });
           } else if (update.sessionUpdate === 'tool_call') {
-            queue.push({ kind: 'tool_call', update: update as unknown as ToolCall });
+            const tc = update as unknown as ToolCall;
+            logger.debug({ sessionId: params.sessionId, updateType, toolName: tc.name }, 'ACP sessionUpdate received');
+            queue.push({ kind: 'tool_call', update: tc });
           } else if (update.sessionUpdate === 'tool_call_update') {
+            logger.debug({ sessionId: params.sessionId, updateType }, 'ACP sessionUpdate received');
             queue.push({ kind: 'tool_call_update', update: update as any });
           } else if (update.sessionUpdate === 'plan') {
-            queue.push({ kind: 'plan', entries: (update as Plan).entries });
+            const entries = (update as Plan).entries;
+            logger.debug({ sessionId: params.sessionId, updateType, entryCount: entries?.length }, 'ACP sessionUpdate received');
+            queue.push({ kind: 'plan', entries });
+          } else {
+            logger.debug({ sessionId: params.sessionId, updateType }, 'ACP sessionUpdate received (ignored)');
           }
-          // other session update types are silently ignored
         },
         async requestPermission(params) {
           return self.dispatchPermission(params);
