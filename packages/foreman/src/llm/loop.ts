@@ -63,30 +63,33 @@ export class LLMLoop {
       // Stop if LLM finished naturally or made no tool calls
       if (toolCalls.length === 0 || stopReason !== 'tool_use') break;
 
-      // Execute tools and collect results
-      const toolResults: ToolResultContent[] = [];
-      for (const tc of toolCalls) {
-        if (signal?.aborted) break;
+      // Execute tools in parallel
+      const toolResults: ToolResultContent[] = await Promise.all(
+        toolCalls.map(async (tc) => {
+          if (signal?.aborted) {
+            return { type: 'tool_result' as const, tool_use_id: tc.id, content: 'Cancelled' };
+          }
 
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), toolTimeoutMs);
-        const toolSignal = signal
-          ? AbortSignal.any([signal, controller.signal])
-          : controller.signal;
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), toolTimeoutMs);
+          const toolSignal = signal
+            ? AbortSignal.any([signal, controller.signal])
+            : controller.signal;
 
-        try {
-          const result = await this._registry.invoke(tc.name, tc.input, toolSignal);
-          toolResults.push({ type: 'tool_result', tool_use_id: tc.id, content: result });
-        } catch (err) {
-          toolResults.push({
-            type: 'tool_result',
-            tool_use_id: tc.id,
-            content: `Error: ${err instanceof Error ? err.message : String(err)}`,
-          });
-        } finally {
-          clearTimeout(timeout);
-        }
-      }
+          try {
+            const result = await this._registry.invoke(tc.name, tc.input, toolSignal);
+            return { type: 'tool_result' as const, tool_use_id: tc.id, content: result };
+          } catch (err) {
+            return {
+              type: 'tool_result' as const,
+              tool_use_id: tc.id,
+              content: `Error: ${err instanceof Error ? err.message : String(err)}`,
+            };
+          } finally {
+            clearTimeout(timeout);
+          }
+        }),
+      );
 
       history.push({ role: 'user', content: toolResults });
     }

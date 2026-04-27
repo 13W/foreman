@@ -228,6 +228,7 @@ export class DefaultACPClientManager implements ACPClientManager {
 
     promptPromise
       .then((r) => {
+        logger.debug({ sessionId, stopReason: r.stopReason }, 'ACP prompt resolved');
         queue.push({ kind: 'stop', reason: r.stopReason as StopReason });
       })
       .catch((err) => {
