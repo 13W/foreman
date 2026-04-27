@@ -3,6 +3,7 @@ import type {
   A2AServer,
   ACPClientManager,
   ACPPermissionRequest,
+  ContentBlock,
   PermissionDecision,
   PromptEvent,
   SessionHandle,
@@ -124,11 +125,26 @@ export class ProxyServer {
       });
     });
 
-    // 6. Run the prompt
+    // 6. Run the prompt loop
     let result: TaskResult = buildErrorTaskResult(new Error('unknown'), worktreeResult);
+    let content: ContentBlock[] = buildSystemPrompt(this.config, payload);
+
     try {
-      const { stopReason, outputText } = await this.runPrompt(payload, handle, pooled.session, worktreeResult);
-      result = buildTaskResult(stopReason, worktreeResult, outputText);
+      while (true) {
+        const { stopReason, outputText } = await this.runPrompt(content, taskId, pooled.session, worktreeResult);
+        result = buildTaskResult(stopReason, worktreeResult, outputText);
+
+        if (this.config.proxy.terminal_mode !== 'permissive' || result.status !== 'completed') {
+          break;
+        }
+
+        const followUpText = await this.a2aServer.requestFollowUp(taskId, result);
+        if (followUpText === null) {
+          result = buildTaskResult('cancelled', worktreeResult);
+          break;
+        }
+        content = [{ type: 'text', text: followUpText }];
+      }
     } catch (err) {
       log.error({ err }, 'runPrompt failed');
       result = buildErrorTaskResult(err, worktreeResult);
@@ -144,18 +160,17 @@ export class ProxyServer {
   }
 
   private async runPrompt(
-    payload: TaskPayload,
-    handle: TaskHandle,
+    content: ContentBlock[],
+    taskId: string,
     session: SessionHandle,
     worktreeResult: WorktreeResult,
   ): Promise<{ stopReason: string; outputText: string }> {
-    const systemPrompt = buildSystemPrompt(this.config, payload);
-    const stream = this.acpClientManager.sendPrompt(session, systemPrompt);
+    const stream = this.acpClientManager.sendPrompt(session, content);
     let outputText = '';
 
     for await (const event of stream) {
       if (event.kind === 'permission_request') {
-        await this.handlePermissionEvent(handle.taskId, event, worktreeResult);
+        await this.handlePermissionEvent(taskId, event, worktreeResult);
       } else if (event.kind === 'stop') {
         return { stopReason: event.reason, outputText };
       } else {
@@ -164,7 +179,7 @@ export class ProxyServer {
         }
         const mapped = mapPromptEventToStreamEvent(event);
         if (mapped) {
-          await this.a2aServer.sendUpdate(handle.taskId, { ...mapped, taskId: handle.taskId } as StreamEvent);
+          await this.a2aServer.sendUpdate(taskId, { ...mapped, taskId } as StreamEvent);
         }
       }
     }

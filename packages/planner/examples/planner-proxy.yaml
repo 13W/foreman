@@ -5,6 +5,7 @@ proxy:
   name: "planner"
   version: "0.1.0"
   bind: "127.0.0.1:7099"
+  terminal_mode: "permissive"   # planner is a stateful plan-owner; stay alive after each turn
 
 wrapped_agent:
   command: "node"

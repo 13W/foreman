@@ -12,6 +12,19 @@ import { PermissionTimeoutError } from '@foreman-stack/shared';
 import { logger } from '../logger.js';
 import { parsePermissionDecision, parseTaskPayload } from './mappers.js';
 
+function extractFollowUpText(message: import('@a2a-js/sdk').Message): string {
+  for (const part of message.parts) {
+    if (part.kind === 'text') return part.text;
+  }
+  for (const part of message.parts) {
+    if (part.kind === 'data') {
+      const d = part.data as Record<string, unknown> | null | undefined;
+      if (typeof d?.['text'] === 'string') return d['text'] as string;
+    }
+  }
+  return '';
+}
+
 // ---------------------------------------------------------------------------
 // Deferred helper
 // ---------------------------------------------------------------------------
@@ -45,6 +58,9 @@ interface TaskContext {
     deferred: Deferred<PermissionDecision>;
     timer: ReturnType<typeof setTimeout>;
   };
+  pendingFollowUp?: {
+    deferred: Deferred<string | null>;
+  };
   cancelFn?: () => void;
 }
 
@@ -73,6 +89,10 @@ export class ProxyAgentExecutor implements AgentExecutor {
       if (existing.pendingInput) {
         const decision = parsePermissionDecision(ctx.userMessage);
         existing.pendingInput.deferred.resolve(decision);
+      } else if (existing.pendingFollowUp) {
+        const text = extractFollowUpText(ctx.userMessage);
+        existing.pendingFollowUp.deferred.resolve(text);
+        existing.pendingFollowUp = undefined;
       }
       return;
     }
@@ -160,6 +180,11 @@ export class ProxyAgentExecutor implements AgentExecutor {
       clearTimeout(ctx.pendingInput.timer);
       ctx.pendingInput.deferred.resolve({ kind: 'cancelled' });
       ctx.pendingInput = undefined;
+    }
+
+    if (ctx.pendingFollowUp) {
+      ctx.pendingFollowUp.deferred.resolve(null);
+      ctx.pendingFollowUp = undefined;
     }
 
     ctx.bus.publish({
@@ -270,6 +295,37 @@ export class ProxyAgentExecutor implements AgentExecutor {
       clearTimeout(timer);
       ctx.pendingInput = undefined;
     }
+  }
+
+  /**
+   * Permissive-mode follow-up: publish input-required (non-final) carrying
+   * result, then block until the A2A client sends a follow-up sendMessage.
+   * Returns the follow-up text, or null if the task was cancelled while waiting.
+   */
+  async requestFollowUp(taskId: string, result: TaskResult): Promise<string | null> {
+    const ctx = this.tasks.get(taskId);
+    if (!ctx) throw new Error(`No task context for taskId: ${taskId}`);
+
+    const deferred = createDeferred<string | null>();
+    ctx.pendingFollowUp = { deferred };
+
+    ctx.bus.publish({
+      kind: 'status-update',
+      taskId,
+      contextId: ctx.contextId,
+      status: {
+        state: 'input-required',
+        message: {
+          kind: 'message',
+          messageId: randomUUID(),
+          parts: [{ kind: 'data', data: result }],
+          role: 'agent',
+        },
+      },
+      final: false,
+    });
+
+    return deferred.promise;
   }
 
   /** Register a cancel callback so the SDK can cascade cancellation into ACP. */

@@ -36,6 +36,13 @@ export interface A2AServer {
     opts: { timeoutMs: number },
   ): Promise<PermissionDecision>;
 
+  /**
+   * Permissive-mode follow-up: publish input-required (non-final) carrying
+   * result, then block until the A2A client sends a follow-up message.
+   * Returns the follow-up text, or null if the task was cancelled while waiting.
+   */
+  requestFollowUp(taskId: string, result: TaskResult): Promise<string | null>;
+
   /** Start the HTTP server and begin accepting A2A connections */
   listen(bindAddr: string): Promise<void>;
 

@@ -12,6 +12,7 @@ import type {
   TaskHandler,
   TaskResult,
 } from '@foreman-stack/shared';
+
 import { ProxyAgentExecutor } from './executor.js';
 import { buildSdkAgentCard } from './mappers.js';
 import { logger } from '../logger.js';
@@ -66,6 +67,10 @@ export class DefaultA2AServer implements A2AServer {
     opts: { timeoutMs: number },
   ): Promise<PermissionDecision> {
     return this.executor.requestInput(taskId, request, opts);
+  }
+
+  async requestFollowUp(taskId: string, result: TaskResult): Promise<string | null> {
+    return this.executor.requestFollowUp(taskId, result);
   }
 
   getBoundAddress(): string {

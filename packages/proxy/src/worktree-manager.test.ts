@@ -7,7 +7,7 @@ import { WorktreeManager, BaseBranchNotFoundError, WorktreeCreationError } from 
 // ---------------------------------------------------------------------------
 function makeConfig(overrides?: Partial<ProxyConfig['worktrees']>): ProxyConfig {
   return {
-    proxy: { name: 'test', version: '0.1.0', bind: '127.0.0.1:7000' },
+    proxy: { name: 'test', version: '0.1.0', bind: '127.0.0.1:7000', terminal_mode: 'strict' },
     wrapped_agent: {
       command: 'echo',
       args: [],

@@ -42,6 +42,16 @@ const ProxyConfigSchema = z.object({
     name: z.string(),
     version: z.string().default('0.1.0'),
     bind: BindSchema,
+    /**
+     * Controls task lifecycle on agent end_turn.
+     * - strict (default): agent end_turn → A2A task transitions to completed/final.
+     *   Use for one-shot worker tasks.
+     * - permissive: agent end_turn → A2A task transitions to input-required, NOT
+     *   final. Task stays alive awaiting follow-up sendMessage from the A2A
+     *   client. Used for stateful plan-owner sessions where foreman queries
+     *   the planner during execution.
+     */
+    terminal_mode: z.enum(['strict', 'permissive']).default('strict'),
   }),
 
   wrapped_agent: z.object({

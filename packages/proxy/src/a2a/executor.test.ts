@@ -96,4 +96,108 @@ describe('ProxyAgentExecutor', () => {
     await executor.cancelTask('t4', bus);
     expect(cancelled).toBe(true);
   });
+
+  // ---------------------------------------------------------------------------
+  // requestFollowUp — permissive mode behaviour
+  // ---------------------------------------------------------------------------
+
+  const completedResult = {
+    status: 'completed' as const,
+    stop_reason: 'end_turn' as const,
+    summary: 'plan here',
+    branch_ref: 'main',
+    session_transcript_ref: '',
+    error: null,
+  };
+
+  it('requestFollowUp publishes input-required (non-final) with result data', async () => {
+    const bus = makeBus();
+    const payload = { description: 'D', originator_intent: 'I', max_delegation_depth: 0 };
+    const ctx = makeCtx('t5', [{ kind: 'data', data: payload }]);
+
+    taskHandler.mockImplementation(async (_p: any, handle: any) => {
+      // Trigger requestFollowUp and leave it pending (don't await in handler)
+      void executor.requestFollowUp(handle.taskId, completedResult);
+    });
+
+    await executor.execute(ctx, bus);
+
+    const calls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls;
+    const inputRequired = calls.find((c: any) => c[0]?.status?.state === 'input-required');
+    expect(inputRequired).toBeTruthy();
+    expect(inputRequired![0].final).toBe(false);
+    expect(inputRequired![0].status.message.parts[0].data).toMatchObject({ status: 'completed' });
+  });
+
+  it('requestFollowUp resolves with text from follow-up execute() re-entry', async () => {
+    const bus = makeBus();
+    const payload = { description: 'D', originator_intent: 'I', max_delegation_depth: 0 };
+    const ctx = makeCtx('t6', [{ kind: 'data', data: payload }]);
+
+    let resolvedText: string | null = null;
+    taskHandler.mockImplementation(async (_p: any, handle: any) => {
+      resolvedText = await executor.requestFollowUp(handle.taskId, completedResult);
+    });
+
+    await executor.execute(ctx, bus);
+
+    // Simulate follow-up sendMessage from A2A client
+    const followUpCtx = makeCtx('t6', [{ kind: 'text', text: 'which option?' }] as any);
+    await executor.execute(followUpCtx, makeBus());
+
+    // Allow microtasks to flush
+    await Promise.resolve();
+
+    expect(resolvedText).toBe('which option?');
+  });
+
+  it('requestFollowUp task remains in tasks map until explicitly completed', async () => {
+    const bus = makeBus();
+    const payload = { description: 'D', originator_intent: 'I', max_delegation_depth: 0 };
+    const ctx = makeCtx('t7', [{ kind: 'data', data: payload }]);
+
+    taskHandler.mockImplementation(async (_p: any, handle: any) => {
+      void executor.requestFollowUp(handle.taskId, completedResult);
+    });
+
+    await executor.execute(ctx, bus);
+    // Task should still be alive (not completed yet)
+    const calls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls;
+    const completedCall = calls.find((c: any) => c[0]?.status?.state === 'completed');
+    expect(completedCall).toBeFalsy();
+  });
+
+  it('requestFollowUp returns null when cancelTask fires while waiting', async () => {
+    const bus = makeBus();
+    const payload = { description: 'D', originator_intent: 'I', max_delegation_depth: 0 };
+    const ctx = makeCtx('t8', [{ kind: 'data', data: payload }]);
+
+    let resolvedText: string | null = 'not-yet';
+    taskHandler.mockImplementation(async (_p: any, handle: any) => {
+      resolvedText = await executor.requestFollowUp(handle.taskId, completedResult);
+    });
+
+    await executor.execute(ctx, bus);
+    await executor.cancelTask('t8', bus);
+    await Promise.resolve();
+
+    expect(resolvedText).toBeNull();
+  });
+
+  it('cancelTask publishes canceled (final) even when pendingFollowUp is set', async () => {
+    const bus = makeBus();
+    const payload = { description: 'D', originator_intent: 'I', max_delegation_depth: 0 };
+    const ctx = makeCtx('t9', [{ kind: 'data', data: payload }]);
+
+    taskHandler.mockImplementation(async (_p: any, handle: any) => {
+      void executor.requestFollowUp(handle.taskId, completedResult);
+    });
+
+    await executor.execute(ctx, bus);
+    await executor.cancelTask('t9', bus);
+
+    const calls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls;
+    const canceledCall = calls.find((c: any) => c[0]?.status?.state === 'canceled' && c[0]?.final === true);
+    expect(canceledCall).toBeTruthy();
+  });
 });

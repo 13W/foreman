@@ -11,7 +11,7 @@ const FIXTURE_PATH = join(__dirname, '..', 'tests', 'fixtures', 'echo-agent.ts')
 
 function makeConfig(maxSubs = 1, maxSess = 1): ProxyConfig {
   return {
-    proxy: { name: 'test', version: '0.1.0', bind: '127.0.0.1:7000' },
+    proxy: { name: 'test', version: '0.1.0', bind: '127.0.0.1:7000', terminal_mode: 'strict' },
     wrapped_agent: {
       command: 'node',
       args: ['--experimental-strip-types', FIXTURE_PATH],
