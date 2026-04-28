@@ -57,7 +57,12 @@ export class SubprocessPool {
       entry = available.reduce((min, e) => (e.activeSessions < min.activeSessions ? e : min));
     }
 
-    const session = await this.client.createSession(entry.handle, cwd, mcpServers);
+    const session = await this.client.createSession(
+      entry.handle,
+      cwd,
+      mcpServers,
+      { disallowedTools: this.config.wrapped_agent.disallowed_tools },
+    );
     entry.activeSessions++;
 
     const pool = this;

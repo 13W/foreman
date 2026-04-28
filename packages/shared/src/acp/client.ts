@@ -10,6 +10,12 @@ import type { ACPPermissionRequest, PromptEvent, SessionHandle, SubprocessHandle
  * ACP session events as a typed PromptEvent iterator; permission handling is embedded
  * inline via the permission_request event's respond() callback.
  */
+
+export interface SessionOptions {
+  /** Tools to block in the wrapped agent's Claude session via _meta.claudeCode.options.disallowedTools. */
+  disallowedTools?: string[];
+}
+
 export interface ACPClientManager {
   spawnSubprocess(
     command: string,
@@ -21,6 +27,7 @@ export interface ACPClientManager {
     subprocess: SubprocessHandle,
     cwd: string,
     mcpServers: McpServerSpec[],
+    options?: SessionOptions,
   ): Promise<SessionHandle>;
 
   /**

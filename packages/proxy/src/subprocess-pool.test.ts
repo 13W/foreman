@@ -18,6 +18,7 @@ function makeConfig(
       env: {},
       cwd_strategy: 'worktree',
       startup_timeout_sec: 30,
+      disallowed_tools: [],
     },
     role: { description: 'test', skills: [] },
     mcps: { personal: [] },
@@ -161,6 +162,7 @@ describe('SubprocessPool — spread-first assignment policy', () => {
       expect.objectContaining({ getId: expect.any(Function) }),
       '/my/worktree',
       mcps,
+      { disallowedTools: [] },
     );
     expect(slot.session).toBeDefined();
 

@@ -60,6 +60,7 @@ const ProxyConfigSchema = z.object({
     env: z.record(z.string(), z.string()).default({}),
     cwd_strategy: z.literal('worktree').default('worktree'),
     startup_timeout_sec: z.number().int().positive().default(30),
+    disallowed_tools: z.array(z.string()).default([]),
   }),
 
   role: z.object({

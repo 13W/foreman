@@ -206,11 +206,16 @@ export class DefaultACPClientManager implements ACPClientManager {
     subprocess: SubprocessHandle,
     cwd: string,
     mcpServers: McpServerSpec[],
+    options?: { disallowedTools?: string[] },
   ): Promise<SessionHandle> {
     const handle = subprocess as DefaultSubprocessHandle;
+    const meta = options?.disallowedTools?.length
+      ? { claudeCode: { options: { disallowedTools: options.disallowedTools } } }
+      : undefined;
     const resp = await handle.connection.newSession({
       cwd,
       mcpServers: mcpServers.map(specToSdkMcpServer),
+      ...(meta ? { _meta: meta } : {}),
     });
     return new DefaultSessionHandle(resp.sessionId, handle);
   }

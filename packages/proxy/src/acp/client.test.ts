@@ -164,6 +164,24 @@ describe('DefaultACPClientManager', () => {
       const session = await manager.createSession(subprocess, '/tmp', []);
       expect(session.getId()).toBe('test-session-id');
     });
+
+    it('does not include _meta when disallowedTools is empty', async () => {
+      const subprocess = await manager.spawnSubprocess('agent', []);
+      await manager.createSession(subprocess, '/tmp', [], { disallowedTools: [] });
+      expect(mocks.connection.newSession).toHaveBeenCalledWith(
+        expect.not.objectContaining({ _meta: expect.anything() }),
+      );
+    });
+
+    it('passes disallowedTools via _meta.claudeCode.options when provided', async () => {
+      const subprocess = await manager.spawnSubprocess('agent', []);
+      await manager.createSession(subprocess, '/tmp', [], { disallowedTools: ['EnterPlanMode'] });
+      expect(mocks.connection.newSession).toHaveBeenCalledWith(
+        expect.objectContaining({
+          _meta: { claudeCode: { options: { disallowedTools: ['EnterPlanMode'] } } },
+        }),
+      );
+    });
   });
 
   // ---- sendPrompt ------------------------------------------------------------

@@ -13,6 +13,8 @@ wrapped_agent:
   env: {}
   cwd_strategy: "worktree"
   startup_timeout_sec: 30
+  disallowed_tools:
+    - "EnterPlanMode"
 
 role:
   description: |

@@ -7,4 +7,4 @@ export type {
   PromptHandler,
   CancelHandler,
 } from './server.js';
-export type { ACPClientManager } from './client.js';
+export type { ACPClientManager, SessionOptions } from './client.js';
