@@ -136,6 +136,7 @@ export class DefaultA2AClient implements A2AClient {
       message: {
         kind: 'message',
         messageId: randomUUID(),
+        taskId,
         contextId: entry.contextId,
         role: 'user',
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
