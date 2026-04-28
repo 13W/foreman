@@ -11,6 +11,7 @@ import {
   isPermissionEvent,
   extractPermissionRequest,
   extractStatusResult,
+  extractFollowUpResult,
   extractArtifactText,
   extractMessageText,
 } from './workers/stream-helpers.js';
@@ -603,6 +604,14 @@ export class Foreman {
           if (state) this.logger.info({ taskId: handle.taskId, agentUrl: url, state, final }, 'worker status');
           const parsed = extractStatusResult(event);
           if (parsed) structuredResult = parsed;
+          if (!parsed) {
+            const followUp = extractFollowUpResult(event);
+            if (followUp) {
+              structuredResult = followUp;
+              await handle.cancel();
+              break;
+            }
+          }
         } else if (event.type === 'artifact') {
           fallbackText = extractArtifactText(event);
           this.logger.debug({ taskId: handle.taskId, agentUrl: url, len: fallbackText.length }, 'worker artifact');
@@ -743,7 +752,20 @@ export class Foreman {
     plannerSession: PlannerSession,
   ): Promise<void> {
     sessionState.pendingPlannerQuestion = null;
-    await plannerSession.resumeWithAnswer(answer);
+
+    try {
+      await plannerSession.resumeWithAnswer(answer);
+    } catch (err) {
+      this.logger.error({ sessionId, err: String(err) }, 'planner resumeWithAnswer failed; closing session');
+      await this.acpServer.sendUpdate(sessionId, [
+        { type: 'text', text: `[planner] error: ${err instanceof Error ? err.message : String(err)}` },
+      ]);
+      await plannerSession.close().catch((closeErr: unknown) =>
+        this.logger.warn({ sessionId, err: String(closeErr) }, 'planner close error after resumeWithAnswer failure'),
+      );
+      this._plannerSessions.delete(sessionId);
+      return;
+    }
 
     const plan = plannerSession.getPlan();
     const nextQuestion = plannerSession.getPendingQuestion();

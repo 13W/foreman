@@ -8,6 +8,7 @@ import type { ForemanConfig } from '../config.js';
 import { toToolName } from '../workers/catalog.js';
 import {
   extractArtifactText,
+  extractFollowUpResult,
   extractMessageText,
   extractPermissionRequest,
   extractStatusResult,
@@ -189,6 +190,16 @@ export class PlanExecutor {
           if (state) this._logger.info({ subtaskId, taskId: handle.taskId, state, final }, 'subtask status');
           const parsed = extractStatusResult(event);
           if (parsed) structuredResult = parsed;
+          // Permissive follow-up: worker completed one turn and is waiting for more work.
+          // We only want one turn per subtask, so extract the result and cancel.
+          if (!parsed) {
+            const followUp = extractFollowUpResult(event);
+            if (followUp) {
+              structuredResult = followUp;
+              await handle.cancel();
+              break;
+            }
+          }
         } else if (event.type === 'artifact') {
           fallbackText = extractArtifactText(event);
         } else if (event.type === 'message') {

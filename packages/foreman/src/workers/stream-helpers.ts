@@ -73,6 +73,28 @@ export function extractStatusResult(event: StreamEvent): TaskResult | null {
   return null;
 }
 
+/**
+ * Extract a TaskResult embedded in a permissive follow-up event.
+ * Workers in permissive mode emit input-required (final: false) with the
+ * completed TaskResult in parts instead of immediately terminating. This helper
+ * lets callers detect and extract the result so they can cancel the task.
+ */
+export function extractFollowUpResult(event: StreamEvent): TaskResult | null {
+  if (event.type !== 'status') return null;
+  const data = event.data as Record<string, unknown> | null | undefined;
+  if (data?.['state'] !== 'input-required' || data?.['final'] !== false) return null;
+  const message = data['message'] as Record<string, unknown> | null | undefined;
+  const parts = (message?.['parts'] as unknown[]) ?? [];
+  for (const part of parts) {
+    const p = part as Record<string, unknown> | null | undefined;
+    if (p?.['kind'] === 'data' && p['data']) {
+      const parsed = TaskResultSchema.safeParse(p['data']);
+      if (parsed.success) return parsed.data;
+    }
+  }
+  return null;
+}
+
 export function extractArtifactText(event: StreamEvent): string {
   const data = event.data as Record<string, unknown> | null | undefined;
   const parts = (data?.['parts'] as unknown[]) ?? [];
