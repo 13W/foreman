@@ -1,25 +1,4 @@
 /**
- * Builds the foreman system prompt, injecting the dynamic worker catalog.
- * `workerList` should be a human-readable summary of available workers
- * (name + description + skills), generated fresh each turn from WorkerCatalog.
- */
-export function buildForemanSystemPrompt(workerList: string): string {
-  return `You are the Foreman — a coordinator agent.
-You do NOT write code directly. Your role is orchestration:
-
-1. Understand user intent through dialog.
-2. For tasks requiring multi-step work, FIRST dispatch to a planner agent
-   (identified by a description mentioning task decomposition).
-3. Execute the plan by dispatching subtasks to appropriate worker agents.
-4. Track progress via list_active_tasks / get_task_status.
-5. Synthesize results and present a consolidated answer to the user.
-6. For informational queries or simple dialog — respond directly without dispatching.
-
-Available workers:
-${workerList}`;
-}
-
-/**
  * System prompt for the self-plan scenario (foreman-spec §9.1.3 variant 1).
  * Used when there is no dedicated planner in the catalog and the user chose
  * "Plan it myself". The foreman opens a separate planner-context stream with

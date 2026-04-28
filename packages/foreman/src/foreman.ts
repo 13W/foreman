@@ -18,7 +18,7 @@ import {
 import { AnthropicLLMClient } from './llm/anthropic-client.js';
 import { LLMLoop } from './llm/loop.js';
 import { ToolRegistry } from './llm/tool-registry.js';
-import { buildForemanSystemPrompt } from './llm/prompts.js';
+
 import type {
   Plan as PlanType,
   PermissionDecision,
@@ -258,250 +258,187 @@ export class Foreman {
     await this.catalog.recheckUnreachable();
 
     const available = this.catalog.getAvailable();
-    const hasPlanner = available.some((w) => this.catalog.isPlanner(w));
     const userText = extractTextFromContent(content);
+    const planners = available.filter((w) => this.catalog.isPlanner(w));
 
-    if (!hasPlanner) {
-      const choice = await this.fallbackHandler.ask(sessionId, userText);
-
-      switch (choice.kind) {
-        case 'cancel':
-          await this.acpServer.sendUpdate(sessionId, [{ type: 'text', text: 'Task cancelled.' }]);
-          return;
-
-        case 'self_plan': {
-          const plannerSession = this.plannerSessionFactory({
-            mode: 'self_planned',
-            llmClient: this.llmClient,
-            config: this.config,
-            logger: this.logger,
-            getExecutionState: () => this._executionStates.get(sessionId) ?? EMPTY_EXECUTION_STATE,
-          });
-          this._plannerSessions.set(sessionId, plannerSession);
-          sessionState.planOwnerRef = { kind: 'self' };
-          await plannerSession.open(buildDecompositionRequest(userText, available));
-          const selfPlan = plannerSession.getPlan();
-          if (!selfPlan) {
-            await this.acpServer.sendUpdate(sessionId, [
-              { type: 'text', text: 'Could not generate a self-made plan.' },
-            ]);
-            await plannerSession.close();
-            this._plannerSessions.delete(sessionId);
-            return;
-          }
-          sessionState.activePlan = selfPlan;
-          await this._executePlan(selfPlan, sessionId, sessionState, userText, available);
-          return;
-        }
-
-        case 'delegate': {
-          const plannerSession = this.plannerSessionFactory({
-            mode: 'external_planner',
-            dispatchManager: this.dispatchManager,
-            a2aClient: this.a2aClient,
-            plannerUrl: choice.workerUrl,
-            config: this.config,
-            logger: this.logger,
-            workersAvailable: available.filter((w) => !this.catalog.isPlanner(w)).flatMap((w) => [toToolName(w), ...(w.agent_card?.name ? [w.agent_card.name] : [])]),
-            getExecutionState: () => this._executionStates.get(sessionId) ?? EMPTY_EXECUTION_STATE,
-            cwd: sessionState.cwd,
-          });
-          this._plannerSessions.set(sessionId, plannerSession);
-          sessionState.planOwnerRef = { kind: 'external', taskId: '' };
-          await plannerSession.open(buildDecompositionRequest(userText, available));
-          const delegatePlan = plannerSession.getPlan();
-          sessionState.planOwnerRef = { kind: 'external', taskId: plannerSession.taskId ?? '' };
-          if (!delegatePlan) {
-            await this.acpServer.sendUpdate(sessionId, [
-              { type: 'text', text: `[${choice.workerName}] did not return a valid plan.` },
-            ]);
-            await plannerSession.close();
-            this._plannerSessions.delete(sessionId);
-            return;
-          }
-          sessionState.activePlan = delegatePlan;
-          await this._executePlan(delegatePlan, sessionId, sessionState, userText, available);
-          return;
-        }
-
-        case 'dispatch_whole': {
-          const plannerSession = this.plannerSessionFactory({
-            mode: 'single_task_dispatch',
-            config: this.config,
-            logger: this.logger,
-          });
-          this._plannerSessions.set(sessionId, plannerSession);
-          sessionState.planOwnerRef = { kind: 'single_task_dispatch' };
-          sessionState.activePlan = choice.plan;
-          await this._executePlan(choice.plan, sessionId, sessionState, userText, available);
-          return;
-        }
-      }
-    }
-    const registry = new ToolRegistry();
-    // Escalation gate bypassed; escalation is handled at the A2A stream level.
-    registry.setEscalationCallback(async () => true);
-
-    let capturedPlan: PlanType | null = null;
-
-    for (const worker of available) {
-      const toolName = toToolName(worker);
-      const isPlanner = this.catalog.isPlanner(worker);
-      this.logger.debug({ toolName, isPlanner }, 'Registering worker tool');
-
-      if (isPlanner) {
-        const plannerName = worker.agent_card?.name ?? worker.name_hint ?? toolName;
-        const plannerUrl = worker.url;
-
-        registry.register(
-          toolName,
-          {
-            name: toolName,
-            description: buildWorkerDescription(worker),
-            inputSchema: {
-              type: 'object',
-              properties: {
-                description: { type: 'string', description: 'Task description for decomposition.' },
-              },
-              required: ['description'],
-            },
-          },
-          async (_args, _signal) => {
-            const plannerSession = this.plannerSessionFactory({
-              mode: 'external_planner',
-              dispatchManager: this.dispatchManager,
-              a2aClient: this.a2aClient,
-              plannerUrl,
-              config: this.config,
-              logger: this.logger,
-              workersAvailable: available.filter((w) => !this.catalog.isPlanner(w)).flatMap((w) => [toToolName(w), ...(w.agent_card?.name ? [w.agent_card.name] : [])]),
-              getExecutionState: () => this._executionStates.get(sessionId) ?? EMPTY_EXECUTION_STATE,
-              cwd: sessionState.cwd,
-            });
-            this._plannerSessions.set(sessionId, plannerSession);
-            sessionState.planOwnerRef = { kind: 'external', taskId: '' };
-
-            await this.acpServer.sendUpdate(sessionId, [
-              { type: 'text', text: `[${plannerName}] starting...` },
-            ]);
-            this.logger.debug({ plannerUrl, sessionId }, 'opening planner session');
-
-            await plannerSession.open(buildDecompositionRequest(userText, available));
-
-            const plan = plannerSession.getPlan();
-            const pendingQuestion = plannerSession.getPendingQuestion();
-            sessionState.planOwnerRef = {
-              kind: 'external',
-              taskId: plannerSession.taskId ?? '',
-            };
-
-            await this.acpServer.sendUpdate(sessionId, [
-              { type: 'text', text: `[${plannerName}] done.` },
-            ]);
-
-            if (plan) {
-              capturedPlan = plan;
-              sessionState.activePlan = plan;
-              return 'Plan received. Executing subtasks.';
-            }
-
-            if (pendingQuestion) {
-              // Planner asked a question — forward to user and pause.
-              sessionState.pendingPlannerQuestion = pendingQuestion;
-              sessionState.originatorIntent = userText;
-              await this.acpServer.sendUpdate(sessionId, [
-                { type: 'text', text: `[planner] ${pendingQuestion}` },
-              ]);
-              // Abort the LLM loop so we don't dispatch workers with no plan.
-              sessionState.abortController?.abort();
-              return '[Planner awaiting user input — respond in next message]';
-            }
-
-            return 'Planner did not return a valid plan.';
-          },
-          { forceWrite: true },
-        );
-      } else {
-        registry.register(
-          toolName,
-          {
-            name: toolName,
-            description: buildWorkerDescription(worker),
-            inputSchema: {
-              type: 'object',
-              properties: {
-                description: { type: 'string', description: 'Task description.' },
-                expected_output: { type: 'string', description: 'Expected output (optional).' },
-              },
-              required: ['description'],
-            },
-          },
-          async (args, signal) => {
-            const payload: TaskPayload = {
-              description: String(args['description'] ?? ''),
-              expected_output:
-                typeof args['expected_output'] === 'string' ? args['expected_output'] : null,
-              inputs: { relevant_files: [], constraints: [], context_from_prior_tasks: [] },
-              originator_intent: userText,
-              max_delegation_depth: 3,
-              parent_task_id: null,
-              base_branch: null,
-              timeout_sec: this.config.runtime.default_task_timeout_sec,
-              injected_mcps: [],
-              cwd: sessionState.cwd,
-            };
-            const taskResult = await this._runWorkerTask(
-              worker.url,
-              payload,
-              sessionId,
-              sessionState,
-              signal,
-            );
-            return JSON.stringify(taskResult);
-          },
-          { forceWrite: true },
-        );
-      }
+    if (planners.length > 0) {
+      this.logger.info({ sessionId, plannerUrl: planners[0].url }, 'has-planner path: programmatic dispatch');
+      await this._runWithExternalPlanner(sessionId, sessionState, userText, available, planners[0]);
+      return;
     }
 
-    const systemPrompt = buildForemanSystemPrompt(buildWorkerList(available));
-    const userMsg = {
-      role: 'user' as const,
-      content: [{ type: 'text' as const, text: userText }],
-    };
-    const messages = [...sessionState.conversationHistory, userMsg];
+    // No planner available — ask user via fallback handler.
+    const choice = await this.fallbackHandler.ask(sessionId, userText);
 
-    sessionState.abortController = new AbortController();
-    const loop = new LLMLoop(this.llmClient, registry, {
-      toolTimeoutMs: this.config.runtime.default_task_timeout_sec * 1000,
+    switch (choice.kind) {
+      case 'cancel':
+        await this.acpServer.sendUpdate(sessionId, [{ type: 'text', text: 'Task cancelled.' }]);
+        return;
+
+      case 'self_plan': {
+        const plannerSession = this.plannerSessionFactory({
+          mode: 'self_planned',
+          llmClient: this.llmClient,
+          config: this.config,
+          logger: this.logger,
+          getExecutionState: () => this._executionStates.get(sessionId) ?? EMPTY_EXECUTION_STATE,
+        });
+        this._plannerSessions.set(sessionId, plannerSession);
+        sessionState.planOwnerRef = { kind: 'self' };
+        await plannerSession.open(buildDecompositionRequest(userText, available));
+        const selfPlan = plannerSession.getPlan();
+        if (!selfPlan) {
+          await this.acpServer.sendUpdate(sessionId, [
+            { type: 'text', text: 'Could not generate a self-made plan.' },
+          ]);
+          await plannerSession.close();
+          this._plannerSessions.delete(sessionId);
+          return;
+        }
+        sessionState.activePlan = selfPlan;
+        await this._executePlan(selfPlan, sessionId, sessionState, userText, available);
+        return;
+      }
+
+      case 'delegate': {
+        const plannerSession = this.plannerSessionFactory({
+          mode: 'external_planner',
+          dispatchManager: this.dispatchManager,
+          a2aClient: this.a2aClient,
+          plannerUrl: choice.workerUrl,
+          config: this.config,
+          logger: this.logger,
+          workersAvailable: available.filter((w) => !this.catalog.isPlanner(w)).flatMap((w) => [toToolName(w), ...(w.agent_card?.name ? [w.agent_card.name] : [])]),
+          getExecutionState: () => this._executionStates.get(sessionId) ?? EMPTY_EXECUTION_STATE,
+          cwd: sessionState.cwd,
+        });
+        this._plannerSessions.set(sessionId, plannerSession);
+        sessionState.planOwnerRef = { kind: 'external', taskId: '' };
+        try {
+          await plannerSession.open(buildDecompositionRequest(userText, available));
+        } catch (err) {
+          this.logger.error({ err: String(err), sessionId }, 'delegate planner session open failed');
+          await this.acpServer.sendUpdate(sessionId, [
+            { type: 'text', text: `[${choice.workerName}] failed: ${err instanceof Error ? err.message : String(err)}` },
+          ]);
+          await plannerSession.close();
+          this._plannerSessions.delete(sessionId);
+          return;
+        }
+        const delegatePlan = plannerSession.getPlan();
+        sessionState.planOwnerRef = { kind: 'external', taskId: plannerSession.taskId ?? '' };
+        if (!delegatePlan) {
+          await this.acpServer.sendUpdate(sessionId, [
+            { type: 'text', text: `[${choice.workerName}] did not return a valid plan.` },
+          ]);
+          await plannerSession.close();
+          this._plannerSessions.delete(sessionId);
+          return;
+        }
+        sessionState.activePlan = delegatePlan;
+        await this._executePlan(delegatePlan, sessionId, sessionState, userText, available);
+        return;
+      }
+
+      case 'dispatch_whole': {
+        const plannerSession = this.plannerSessionFactory({
+          mode: 'single_task_dispatch',
+          config: this.config,
+          logger: this.logger,
+        });
+        this._plannerSessions.set(sessionId, plannerSession);
+        sessionState.planOwnerRef = { kind: 'single_task_dispatch' };
+        sessionState.activePlan = choice.plan;
+        await this._executePlan(choice.plan, sessionId, sessionState, userText, available);
+        return;
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Programmatic external-planner flow
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Dispatches the user's prompt to the given planner, awaits the plan, and
+   * executes it via PlanExecutor. No LLM loop — foreman selects the planner
+   * deterministically from the catalog.
+   */
+  private async _runWithExternalPlanner(
+    sessionId: string,
+    sessionState: SessionState,
+    userText: string,
+    available: WorkerCatalogEntry[],
+    planner: WorkerCatalogEntry,
+  ): Promise<void> {
+    const plannerName = planner.agent_card?.name ?? planner.name_hint ?? toToolName(planner);
+
+    await this.acpServer.sendUpdate(sessionId, [
+      { type: 'text', text: `Dispatching to [${plannerName}]...` },
+    ]);
+
+    const workersAvailable = available
+      .filter((w) => !this.catalog.isPlanner(w))
+      .flatMap((w) => [toToolName(w), ...(w.agent_card?.name ? [w.agent_card.name] : [])]);
+
+    const plannerSession = this.plannerSessionFactory({
+      mode: 'external_planner',
+      dispatchManager: this.dispatchManager,
+      a2aClient: this.a2aClient,
+      plannerUrl: planner.url,
+      config: this.config,
+      logger: this.logger,
+      workersAvailable,
+      getExecutionState: () => this._executionStates.get(sessionId) ?? EMPTY_EXECUTION_STATE,
+      cwd: sessionState.cwd,
     });
 
+    this._plannerSessions.set(sessionId, plannerSession);
+    sessionState.planOwnerRef = { kind: 'external', taskId: '' };
+
     try {
-      // Drive the generator manually to capture the return value (updated history).
-      const gen = loop.run(messages, systemPrompt, sessionState.abortController.signal);
-      while (true) {
-        const result = await gen.next();
-        if (result.done) {
-          sessionState.conversationHistory = result.value;
-          break;
-        }
-        const event = result.value;
-        if (event.type === 'text_chunk') {
-          // Stream foreman's thinking to the user in real-time
-          await this.acpServer.sendUpdate(sessionId, [{ type: 'text', text: event.text }]);
-        } else if (event.type === 'tool_call') {
-          const input = event.input as Record<string, unknown>;
-          const desc = String(input.description ?? '').slice(0, 120);
-          this.logger.info({ sessionId, worker: event.name, description: desc }, 'LLM → worker dispatch');
-        }
-      }
-    } finally {
-      sessionState.abortController = null;
+      await plannerSession.open(buildDecompositionRequest(userText, available));
+    } catch (err) {
+      this.logger.error({ err: String(err), sessionId }, 'planner session open failed');
+      await this.acpServer.sendUpdate(sessionId, [
+        { type: 'text', text: `[${plannerName}] failed: ${err instanceof Error ? err.message : String(err)}` },
+      ]);
+      await plannerSession.close();
+      this._plannerSessions.delete(sessionId);
+      return;
     }
 
-    if (capturedPlan) {
-      await this._executePlan(capturedPlan, sessionId, sessionState, userText, available);
+    const plan = plannerSession.getPlan();
+    const pendingQuestion = plannerSession.getPendingQuestion();
+    sessionState.planOwnerRef = {
+      kind: 'external',
+      taskId: plannerSession.taskId ?? '',
+    };
+
+    if (plan) {
+      this.logger.info({ sessionId, plannerUrl: planner.url, batchCount: plan.batches.length }, 'plan received; starting execution');
+      sessionState.activePlan = plan;
+      await this._executePlan(plan, sessionId, sessionState, userText, available);
+      return;
     }
+
+    if (pendingQuestion) {
+      this.logger.info({ sessionId }, 'planner pending question; suspending until next user prompt');
+      sessionState.pendingPlannerQuestion = pendingQuestion;
+      sessionState.originatorIntent = userText;
+      await this.acpServer.sendUpdate(sessionId, [
+        { type: 'text', text: `[${plannerName}] ${pendingQuestion}` },
+      ]);
+      return;
+    }
+
+    // No plan, no question → planner failed silently.
+    this.logger.warn({ sessionId, plannerUrl: planner.url }, 'planner returned no plan and no question');
+    await this.acpServer.sendUpdate(sessionId, [
+      { type: 'text', text: `[${plannerName}] did not return a valid plan.` },
+    ]);
+    await plannerSession.close();
+    this._plannerSessions.delete(sessionId);
   }
 
   // ---------------------------------------------------------------------------

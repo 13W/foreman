@@ -213,27 +213,10 @@ describe('Foreman integration — happy path', () => {
   });
 
   it('executes a 2-subtask plan and emits structured plan + tool_call updates', async () => {
-    // LLM turns:
-    //  0 — call planner tool
-    //  1 — acknowledge tool result (text only, no further tools)
-    //  2 — synthesis response
-    const llmTurns: LLMEvent[][] = [
-      [
-        { type: 'tool_call', id: 'tc-1', name: 'planner', input: { description: 'Refactor auth and add tests' } },
-        { type: 'stop', stopReason: 'tool_use' },
-      ],
-      [
-        { type: 'stop', stopReason: 'end_turn' },
-      ],
-      [
-        { type: 'text_chunk', text: 'Done.' },
-        { type: 'stop', stopReason: 'end_turn' },
-      ],
-    ];
-    let llmTurnIdx = 0;
+    // With the programmatic planner path, the LLM is only called for synthesis.
     vi.spyOn(priv(foreman).llmClient, 'completeWithTools').mockImplementation(async function* () {
-      const events = llmTurns[llmTurnIdx++] ?? [];
-      for (const e of events) yield e;
+      yield { type: 'text_chunk', text: 'Done.' } as LLMEvent;
+      yield { type: 'stop', stopReason: 'end_turn' } as LLMEvent;
     });
 
     // Dispatch mock: planner → plan; coder + tester → success.
@@ -275,7 +258,7 @@ describe('Foreman integration — happy path', () => {
       { type: 'text', text: 'Refactor auth and add tests' },
     ]);
 
-    // [planner] starting/done messages come from the planner tool callback (not onSubtaskEvent).
+    // _runWithExternalPlanner sends "Dispatching to [planner]..." which contains "[planner]"
     expect(sendUpdates.some((u) => u.includes('[planner]'))).toBe(true);
     // "Done." is the final synthesis update.
     expect(sendUpdates[sendUpdates.length - 1]).toBe('Done.');
@@ -306,6 +289,213 @@ describe('Foreman integration — happy path', () => {
     // Final plan has all entries completed
     const finalPlan = planCalls[planCalls.length - 1];
     expect(finalPlan.every((e: any) => e.status === 'completed')).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Programmatic planner path — unit-level tests
+// ---------------------------------------------------------------------------
+
+describe('Foreman integration — has-planner programmatic dispatch', () => {
+  const SESSION_ID = 'planner-dispatch-session';
+
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it('calls plannerSessionFactory with external_planner mode and executes the plan', async () => {
+    const foreman = await buildForeman();
+    priv(foreman).sessionManager.create(SESSION_ID, '/tmp');
+
+    const mockPlannerSession = {
+      mode: 'external_planner' as const,
+      taskId: 'planner-task-p1',
+      open: vi.fn().mockResolvedValue(undefined),
+      ask: vi.fn(),
+      close: vi.fn().mockResolvedValue(undefined),
+      getPlan: vi.fn().mockReturnValue({
+        plan_id: 'p1',
+        originator_intent: 'do work',
+        goal_summary: 'Do it',
+        source: 'external_planner',
+        batches: [{
+          batch_id: 'b1',
+          subtasks: [{
+            id: 's1',
+            assigned_agent: 'coder',
+            description: 'write code',
+            expected_output: null,
+            inputs: { relevant_files: [], constraints: [], context_from_prior_tasks: [] },
+          }],
+        }],
+      }),
+      getPendingQuestion: vi.fn().mockReturnValue(null),
+      resumeWithAnswer: vi.fn(),
+      markExecutionStarted: vi.fn(),
+    };
+
+    const factorySpy = vi.fn().mockReturnValue(mockPlannerSession);
+    priv(foreman).plannerSessionFactory = factorySpy;
+
+    vi.spyOn(priv(foreman).dispatchManager, 'dispatch').mockImplementation(
+      (async (url: any) => {
+        if (url === 'http://coder.test')
+          return makeHandle('coder-task-p1', url, [makeCompletedStatusEvent('coder-task-p1')]);
+        throw new Error(`Unexpected dispatch to ${url}`);
+      }) as any,
+    );
+
+    priv(foreman).llmClient = {
+      completeWithTools: async function* () {
+        yield { type: 'text_chunk', text: 'done' } as LLMEvent;
+        yield { type: 'stop', stopReason: 'end_turn' } as LLMEvent;
+      },
+    };
+
+    await priv(foreman)._handlePrompt(SESSION_ID, [{ type: 'text', text: 'do work' }]);
+
+    // plannerSessionFactory called with external_planner mode pointing to planner URL
+    expect(factorySpy).toHaveBeenCalledWith(expect.objectContaining({
+      mode: 'external_planner',
+      plannerUrl: 'http://planner.test',
+    }));
+    // plannerSession.open was called with the decomposition request
+    expect(mockPlannerSession.open).toHaveBeenCalledWith(expect.stringContaining('do work'));
+  });
+
+  it('forwards pending question to user and suspends without executing plan', async () => {
+    const foreman = await buildForeman();
+    priv(foreman).sessionManager.create(SESSION_ID, '/tmp');
+
+    const mockPlannerSession = {
+      mode: 'external_planner' as const,
+      taskId: 'planner-task-q1',
+      open: vi.fn().mockResolvedValue(undefined),
+      ask: vi.fn(),
+      close: vi.fn().mockResolvedValue(undefined),
+      getPlan: vi.fn().mockReturnValue(null),
+      getPendingQuestion: vi.fn().mockReturnValue('Which branch should I use?'),
+      resumeWithAnswer: vi.fn(),
+      markExecutionStarted: vi.fn(),
+    };
+    priv(foreman).plannerSessionFactory = vi.fn().mockReturnValue(mockPlannerSession);
+
+    const sendUpdates: string[] = [];
+    vi.spyOn(priv(foreman).acpServer, 'sendUpdate').mockImplementation(
+      (async (_sid: any, content: any) => {
+        for (const block of content as Array<{ type: string; text?: string }>) {
+          if (block.type === 'text' && block.text) sendUpdates.push(block.text);
+        }
+      }) as any,
+    );
+    const dispatchSpy = vi.spyOn(priv(foreman).dispatchManager, 'dispatch');
+
+    await priv(foreman)._handlePrompt(SESSION_ID, [{ type: 'text', text: 'do work' }]);
+
+    // Planner question was forwarded to user
+    expect(sendUpdates.some((u) => u.includes('Which branch should I use?'))).toBe(true);
+    // No worker dispatch happened
+    expect(dispatchSpy).not.toHaveBeenCalled();
+    // sessionState has pending question set
+    const state = priv(foreman).sessionManager.get(SESSION_ID);
+    expect(state.pendingPlannerQuestion).toBe('Which branch should I use?');
+  });
+
+  it('handles planner open() failure gracefully', async () => {
+    const foreman = await buildForeman();
+    priv(foreman).sessionManager.create(SESSION_ID, '/tmp');
+
+    const mockPlannerSession = {
+      mode: 'external_planner' as const,
+      taskId: null,
+      open: vi.fn().mockRejectedValue(new Error('planner unreachable')),
+      ask: vi.fn(),
+      close: vi.fn().mockResolvedValue(undefined),
+      getPlan: vi.fn().mockReturnValue(null),
+      getPendingQuestion: vi.fn().mockReturnValue(null),
+      resumeWithAnswer: vi.fn(),
+      markExecutionStarted: vi.fn(),
+    };
+    priv(foreman).plannerSessionFactory = vi.fn().mockReturnValue(mockPlannerSession);
+
+    const sendUpdates: string[] = [];
+    vi.spyOn(priv(foreman).acpServer, 'sendUpdate').mockImplementation(
+      (async (_sid: any, content: any) => {
+        for (const block of content as Array<{ type: string; text?: string }>) {
+          if (block.type === 'text' && block.text) sendUpdates.push(block.text);
+        }
+      }) as any,
+    );
+
+    await priv(foreman)._handlePrompt(SESSION_ID, [{ type: 'text', text: 'do work' }]);
+
+    // Error message sent to user
+    expect(sendUpdates.some((u) => u.includes('planner unreachable'))).toBe(true);
+    // Session cleaned up
+    expect(mockPlannerSession.close).toHaveBeenCalled();
+  });
+
+  it('picks the first planner deterministically when multiple planners are available', async () => {
+    // Build a foreman with two planners registered.
+    const TWO_PLANNER_CONFIG = {
+      ...BASE_CONFIG,
+      workers: [
+        { url: 'http://planner.test' },
+        { url: 'http://planner2.test' },
+        { url: 'http://coder.test' },
+      ],
+    };
+    const PLANNER2_CARD: AgentCardMetadata = {
+      name: 'planner2',
+      url: 'http://planner2.test',
+      version: '1.0',
+      skills: [{ id: 'task_decomposition', name: 'Task Decomposition', description: '', tags: [] }],
+    };
+
+    const sessionManager = new SessionManager({ maxConcurrentSessions: 4 });
+    const foreman = new Foreman({
+      config: TWO_PLANNER_CONFIG as never,
+      sessionManager,
+      plannerSessionFactory: createPlannerSession,
+    });
+
+    vi.spyOn(priv(foreman).a2aClient, 'fetchAgentCard').mockImplementation(
+      (async (url: any): Promise<AgentCardMetadata> => {
+        if (url === 'http://planner.test') return PLANNER_CARD;
+        if (url === 'http://planner2.test') return PLANNER2_CARD;
+        if (url === 'http://coder.test') return CODER_CARD;
+        throw new Error(`Unknown agent URL: ${url}`);
+      }) as any,
+    );
+    await priv(foreman).catalog.loadFromConfig(TWO_PLANNER_CONFIG.workers);
+
+    vi.spyOn(priv(foreman).acpServer, 'sendUpdate').mockResolvedValue(undefined);
+    vi.spyOn(priv(foreman).acpServer, 'sendPlan').mockResolvedValue(undefined);
+    vi.spyOn(priv(foreman).acpServer, 'sendToolCall').mockResolvedValue(undefined);
+    vi.spyOn(priv(foreman).acpServer, 'sendToolCallUpdate').mockResolvedValue(undefined);
+
+    sessionManager.create(SESSION_ID, '/tmp');
+
+    const factorySpy = vi.fn().mockReturnValue({
+      mode: 'external_planner' as const,
+      taskId: null,
+      open: vi.fn().mockResolvedValue(undefined),
+      ask: vi.fn(),
+      close: vi.fn().mockResolvedValue(undefined),
+      getPlan: vi.fn().mockReturnValue(null),
+      getPendingQuestion: vi.fn().mockReturnValue('clarify?'),
+      resumeWithAnswer: vi.fn(),
+      markExecutionStarted: vi.fn(),
+    });
+    priv(foreman).plannerSessionFactory = factorySpy;
+
+    await priv(foreman)._handlePrompt(SESSION_ID, [{ type: 'text', text: 'do work' }]);
+
+    // First planner (http://planner.test) is picked
+    expect(factorySpy).toHaveBeenCalledWith(expect.objectContaining({
+      plannerUrl: 'http://planner.test',
+    }));
+    // Second planner was not used
+    const calls = factorySpy.mock.calls as Array<[{ plannerUrl?: string }]>;
+    expect(calls.every((c) => c[0].plannerUrl !== 'http://planner2.test')).toBe(true);
   });
 });
 
