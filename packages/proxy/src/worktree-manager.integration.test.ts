@@ -26,6 +26,7 @@ function makeConfig(repoDir: string, worktreeBaseDir: string): ProxyConfig {
       env: {},
       cwd_strategy: 'worktree',
       startup_timeout_sec: 30,
+      disallowed_tools: [],
     },
     role: { description: 'test', skills: [] },
     mcps: { personal: [] },

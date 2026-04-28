@@ -14,6 +14,7 @@ function makeConfig(overrides?: Partial<ProxyConfig['worktrees']>): ProxyConfig 
       env: {},
       cwd_strategy: 'worktree',
       startup_timeout_sec: 30,
+      disallowed_tools: [],
     },
     role: { description: 'test', skills: [] },
     mcps: { personal: [] },
