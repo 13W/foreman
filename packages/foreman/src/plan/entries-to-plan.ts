@@ -14,6 +14,18 @@ export class EntriesToPlanError extends Error {
 }
 
 /**
+ * Parses the worker tag prefix from a TodoWrite entry's content.
+ * Expected format: "[worker_name] description text"
+ * Returns the worker name and the description with the prefix stripped.
+ * If no prefix is present, returns null worker and the original content unchanged.
+ */
+export function parseWorkerPrefix(content: string): { worker: string | null; description: string } {
+  const match = content.match(/^\s*\[([A-Za-z][A-Za-z0-9_-]*)\]\s*(.*)/s);
+  if (!match) return { worker: null, description: content };
+  return { worker: match[1], description: match[2].trim() };
+}
+
+/**
  * Convert ACP PlanEntries into a Foreman Plan via topological sort.
  *
  * _meta conventions:
@@ -44,23 +56,39 @@ export function entriesToPlan(
     const meta = (entry._meta ?? {}) as Record<string, unknown>;
     const subtaskId =
       typeof meta['subtaskId'] === 'string' && meta['subtaskId'] ? meta['subtaskId'] : `t${idx + 1}`;
-    let assignedAgent = typeof meta['assignedAgent'] === 'string' ? meta['assignedAgent'] : '';
     const blockedBy: string[] = Array.isArray(meta['blockedBy'])
       ? (meta['blockedBy'] as unknown[]).filter((x): x is string => typeof x === 'string')
       : [];
     const expectedOutput =
       typeof meta['expectedOutput'] === 'string' ? meta['expectedOutput'] : null;
 
-    if (!assignedAgent || !args.availableWorkerNames.includes(assignedAgent)) {
-      if (!assignedAgent) {
+    // Resolve worker assignment: content prefix > _meta.assignedAgent > first available
+    const { worker: prefixWorker, description: contentWithoutPrefix } = parseWorkerPrefix(entry.content);
+    const metaWorker = typeof meta['assignedAgent'] === 'string' ? meta['assignedAgent'] : '';
+
+    let assignedAgent: string;
+    let stripped = false;
+
+    if (prefixWorker && args.availableWorkerNames.includes(prefixWorker)) {
+      assignedAgent = prefixWorker;
+      stripped = true;
+    } else if (metaWorker && args.availableWorkerNames.includes(metaWorker)) {
+      assignedAgent = metaWorker;
+    } else {
+      if (prefixWorker) {
         args.logger.warn(
-          { entryIndex: idx, subtaskId },
-          'entry missing _meta.assignedAgent; falling back to first available worker',
+          { entryIndex: idx, subtaskId, prefixWorker, availableWorkerNames: args.availableWorkerNames },
+          'unknown worker prefix; falling back to first available worker',
+        );
+      } else if (metaWorker) {
+        args.logger.warn(
+          { entryIndex: idx, subtaskId, metaWorker },
+          'unknown _meta.assignedAgent; falling back to first available worker',
         );
       } else {
         args.logger.warn(
-          { entryIndex: idx, subtaskId, assignedAgent },
-          'unknown _meta.assignedAgent; falling back to first available worker',
+          { entryIndex: idx, subtaskId, contentPreview: entry.content.slice(0, 60) },
+          'entry has no worker prefix or _meta.assignedAgent; falling back to first available worker',
         );
       }
       if (args.availableWorkerNames.length === 0) {
@@ -71,7 +99,9 @@ export function entriesToPlan(
       assignedAgent = args.availableWorkerNames[0];
     }
 
-    return { subtaskId, assignedAgent, blockedBy, content: entry.content, expectedOutput };
+    const description = stripped ? contentWithoutPrefix : entry.content;
+
+    return { subtaskId, assignedAgent, blockedBy, content: description, expectedOutput };
   });
 
   // Deduplicate subtask IDs (defensive; planner should provide unique IDs)
