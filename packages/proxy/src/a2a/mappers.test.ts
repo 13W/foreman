@@ -90,7 +90,7 @@ describe('mapPromptEventToStreamEvent', () => {
     expect(event?.type).toBe('status');
   });
 
-  it('maps plan event to status with entries carried in data part', () => {
+  it('maps plan event to flat message with data part carrying entries (no double-wrap)', () => {
     const entries = [
       { content: 'task 1', priority: 'medium', status: 'pending' },
       { content: 'task 2', priority: 'low', status: 'pending' },
@@ -98,8 +98,10 @@ describe('mapPromptEventToStreamEvent', () => {
     const event = mapPromptEventToStreamEvent({ kind: 'plan', entries });
     expect(event?.type).toBe('status');
     const data = event?.data as any;
-    expect(data.state).toBe('working');
-    const parts = data.message?.parts as any[];
+    // Flat shape: data IS the message itself — no nested message wrap
+    expect(data.kind).toBe('message');
+    expect(data.message).toBeUndefined();
+    const parts = data.parts as any[];
     expect(parts).toHaveLength(1);
     expect(parts[0].kind).toBe('data');
     expect(parts[0].data.entries).toHaveLength(2);

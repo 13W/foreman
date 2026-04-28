@@ -147,7 +147,7 @@ function makeTextMessageEvent(text: string, taskId = 'plan-task'): StreamEvent {
   };
 }
 
-/** Matches the wire shape produced by proxy mappers.ts case 'plan' (Commit 1). */
+/** Matches the flat wire shape produced by proxy mappers.ts case 'plan' (post double-wrap fix). */
 function makePlanEntriesEvent(
   entries: Array<{ content: string; subtaskId: string; assignedAgent: string; blockedBy?: string[] }>,
   taskId = 'plan-task',
@@ -157,29 +157,25 @@ function makePlanEntriesEvent(
     taskId,
     data: {
       kind: 'message',
-      state: 'working',
-      message: {
-        kind: 'message',
-        messageId: 'plan-msg',
-        role: 'agent',
-        parts: [
-          {
-            kind: 'data',
-            data: {
-              entries: entries.map((e) => ({
-                content: e.content,
-                priority: 'medium',
-                status: 'pending',
-                _meta: {
-                  subtaskId: e.subtaskId,
-                  assignedAgent: e.assignedAgent,
-                  blockedBy: e.blockedBy ?? [],
-                },
-              })),
-            },
+      messageId: 'plan-msg',
+      role: 'agent',
+      parts: [
+        {
+          kind: 'data',
+          data: {
+            entries: entries.map((e) => ({
+              content: e.content,
+              priority: 'medium',
+              status: 'pending',
+              _meta: {
+                subtaskId: e.subtaskId,
+                assignedAgent: e.assignedAgent,
+                blockedBy: e.blockedBy ?? [],
+              },
+            })),
           },
-        ],
-      },
+        },
+      ],
     },
   };
 }

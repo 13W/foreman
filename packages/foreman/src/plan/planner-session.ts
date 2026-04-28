@@ -93,14 +93,14 @@ export interface PlannerSession {
 
 /**
  * Extract plain text from a status event's message parts.
- * The proxy tunnels ACP agent_message_chunk events as working status-updates
- * with text in status.message.parts — not as message events.
+ * Checks data.parts first (post-fix flat shape), falls back to data.message.parts (legacy).
  */
 function extractTextFromStatusMessage(event: StreamEvent): string {
   const data = event.data as Record<string, unknown> | null | undefined;
-  const message = data?.['message'] as Record<string, unknown> | null | undefined;
-  if (!message) return '';
-  const parts = (message['parts'] as unknown[]) ?? [];
+  const parts: unknown[] =
+    (data?.['parts'] as unknown[] | undefined) ??
+    ((data?.['message'] as Record<string, unknown> | undefined)?.['parts'] as unknown[] | undefined) ??
+    [];
   let result = '';
   for (const part of parts) {
     const p = part as Record<string, unknown> | null | undefined;
@@ -113,12 +113,15 @@ function extractTextFromStatusMessage(event: StreamEvent): string {
 
 /**
  * Extract ACP plan entries from a status event produced by the proxy mapper.
- * The mapper wraps entries in: data.message.parts[].{kind:'data', data:{entries:[...]}}.
+ * Post-fix flat shape: entries at data.parts[].{kind:'data', data:{entries:[...]}}.
+ * Legacy shape fallback: data.message.parts[].{kind:'data', data:{entries:[...]}}.
  */
 function extractPlanEntriesFromStatusEvent(event: StreamEvent): unknown[] | null {
   const data = event.data as Record<string, unknown> | null | undefined;
-  const message = data?.['message'] as Record<string, unknown> | null | undefined;
-  const parts = (message?.['parts'] as unknown[]) ?? [];
+  const parts: unknown[] =
+    (data?.['parts'] as unknown[] | undefined) ??
+    ((data?.['message'] as Record<string, unknown> | undefined)?.['parts'] as unknown[] | undefined) ??
+    [];
   for (const part of parts) {
     const p = part as Record<string, unknown> | null | undefined;
     if (p?.['kind'] === 'data') {
@@ -149,8 +152,10 @@ function tryParsePlanFromText(text: string): Plan | null {
 
 function tryParsePlanFromStatusEvent(event: StreamEvent): Plan | null {
   const data = event.data as Record<string, unknown> | null | undefined;
-  const message = data?.['message'] as Record<string, unknown> | null | undefined;
-  const parts = (message?.['parts'] as unknown[]) ?? [];
+  const parts: unknown[] =
+    (data?.['parts'] as unknown[] | undefined) ??
+    ((data?.['message'] as Record<string, unknown> | undefined)?.['parts'] as unknown[] | undefined) ??
+    [];
   for (const part of parts) {
     const p = part as Record<string, unknown> | null | undefined;
     if (p?.['kind'] === 'data' && p['data']) {
@@ -367,6 +372,10 @@ export class ExternalPlannerSession implements PlannerSession {
         // Check for plan entries from the proxy mapper (primary ACP plan path)
         const rawEntries = extractPlanEntriesFromStatusEvent(event);
         if (rawEntries !== null) {
+          this._logger.debug(
+            { entryCount: rawEntries.length, phase: this._phase },
+            'received plan entries from status event',
+          );
           this._handleIncomingEntries(rawEntries as PlanEntry[]);
           // Don't break — keep consuming; plan can be refined multiple times
         }

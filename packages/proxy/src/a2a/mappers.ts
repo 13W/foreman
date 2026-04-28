@@ -109,13 +109,9 @@ export function mapPromptEventToStreamEvent(event: PromptEvent): StreamEvent | n
         taskId: '',
         data: {
           kind: 'message',
-          state: 'working',
-          message: {
-            kind: 'message',
-            messageId: randomUUID(),
-            parts: [{ kind: 'data', data: { entries: event.entries } }],
-            role: 'agent',
-          },
+          messageId: randomUUID(),
+          parts: [{ kind: 'data', data: { entries: event.entries } }],
+          role: 'agent',
         },
       };
     case 'stop':
