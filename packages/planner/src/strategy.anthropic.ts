@@ -9,7 +9,7 @@ import {
   ESCALATION_SYSTEM_PROMPT,
 } from './prompts.js';
 import { Logger } from 'pino';
-import { zodToJsonSchema } from 'zod-to-json-schema';
+import { z } from 'zod';
 
 export class AnthropicStrategy implements Strategy {
   private client: Anthropic;
@@ -53,7 +53,7 @@ export class AnthropicStrategy implements Strategy {
       {
         name: 'submit_plan',
         description: 'Submit a validated plan for the requested task',
-        input_schema: zodToJsonSchema(Plan as any) as any,
+        input_schema: (() => { const { $schema: _, ...s } = z.toJSONSchema(Plan); return s; })() as Anthropic.Tool['input_schema'],
       },
     ];
 
