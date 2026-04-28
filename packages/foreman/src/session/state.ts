@@ -26,6 +26,10 @@ export class SessionState {
   planOwnerRef: PlanOwnerRef | null;
   activePlan: Plan | null;
   abortController: AbortController | null;
+  /** Non-null when planner asked a question and we're waiting for the user's answer. */
+  pendingPlannerQuestion: string | null;
+  /** The original user intent, persisted for plan execution after multi-turn planner dialogue. */
+  originatorIntent: string | null;
 
   constructor(sessionId: string, cwd: string) {
     this.sessionId = sessionId;
@@ -37,5 +41,7 @@ export class SessionState {
     this.planOwnerRef = null;
     this.activePlan = null;
     this.abortController = null;
+    this.pendingPlannerQuestion = null;
+    this.originatorIntent = null;
   }
 }

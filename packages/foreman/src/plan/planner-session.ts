@@ -57,6 +57,18 @@ export interface PlannerSession {
    * The Plan parsed during open(). Null for single_task_dispatch or if not yet opened.
    */
   getPlan(): Plan | null;
+
+  /**
+   * Non-null when the planner emitted a question (input-required without a plan).
+   * The foreman should forward this to the user and call resumeWithAnswer() on the next turn.
+   */
+  getPendingQuestion(): string | null;
+
+  /**
+   * Send the user's answer back to the planner and continue consuming events.
+   * Updates the plan if the planner responds with one, or sets a new pending question.
+   */
+  resumeWithAnswer(answer: string): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -160,6 +172,7 @@ export class ExternalPlannerSession implements PlannerSession {
   private _handle: DispatchHandle | null = null;
   private _taskId: string | null = null;
   private _plan: Plan | null = null;
+  private _pendingQuestion: string | null = null;
   private _closed = false;
 
   get taskId(): string | null { return this._taskId; }
@@ -227,6 +240,22 @@ export class ExternalPlannerSession implements PlannerSession {
     return this._plan;
   }
 
+  getPendingQuestion(): string | null {
+    return this._pendingQuestion;
+  }
+
+  async resumeWithAnswer(answer: string): Promise<void> {
+    if (this._closed) throw new Error('PlannerSession already closed');
+    if (!this._handle || !this._taskId) throw new Error('PlannerSession not open');
+
+    this._pendingQuestion = null;
+    this._logger.debug({ taskId: this._taskId }, 'resuming planner with user answer');
+    await this._a2aClient.sendFollowUp(this._taskId, [{ kind: 'text', text: answer }]);
+
+    const { plan } = await this._consumeUntilPlanOrPause();
+    if (plan) this._plan = plan;
+  }
+
   /**
    * Consume events from the handle (using manual .next() to avoid breaking the
    * generator on early exit) until:
@@ -261,7 +290,16 @@ export class ExternalPlannerSession implements PlannerSession {
       } else if (event.type === 'status') {
         const statusText = extractTextFromStatusMessage(event);
         if (statusText) text += statusText;
-        if (isInputRequired(event)) break;
+        if (isInputRequired(event)) {
+          // Try to extract a plan from the status event data (e.g. summary field).
+          const fromStatus = tryParsePlanFromStatusEvent(event);
+          if (fromStatus) plan = fromStatus;
+          if (!plan && !tryParsePlanFromText(text)) {
+            // Planner is asking a question or paused without a plan.
+            this._pendingQuestion = text.trim() || '(planner needs clarification)';
+          }
+          break;
+        }
         if (isTerminalStatus(event)) {
           const fromStatus = tryParsePlanFromStatusEvent(event);
           if (fromStatus) plan = fromStatus;
@@ -275,6 +313,7 @@ export class ExternalPlannerSession implements PlannerSession {
 
     if (!plan && text) {
       plan = tryParsePlanFromText(text);
+      if (plan) this._pendingQuestion = null;
     }
 
     return { plan, text };
@@ -295,6 +334,7 @@ export class SelfPlannedSession implements PlannerSession {
 
   private _history: Message[] = [];
   private _plan: Plan | null = null;
+  private _pendingQuestion: string | null = null;
 
   private readonly _logger: Logger;
   private readonly _timeoutMs: number;
@@ -339,6 +379,14 @@ export class SelfPlannedSession implements PlannerSession {
     return this._plan;
   }
 
+  getPendingQuestion(): string | null {
+    return this._pendingQuestion;
+  }
+
+  async resumeWithAnswer(_answer: string): Promise<void> {
+    // Self-planned sessions don't pause for user questions.
+  }
+
   private async _runOneTurn(messages: Message[]): Promise<string> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this._timeoutMs);
@@ -381,6 +429,14 @@ export class SingleTaskDispatchSession implements PlannerSession {
 
   getPlan(): Plan | null {
     return null;
+  }
+
+  getPendingQuestion(): string | null {
+    return null;
+  }
+
+  async resumeWithAnswer(_answer: string): Promise<void> {
+    // no-op
   }
 }
 

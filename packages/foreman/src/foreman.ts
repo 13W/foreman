@@ -221,6 +221,17 @@ export class Foreman {
       return;
     }
 
+    // If a planner question is pending, treat this prompt as the user's answer.
+    if (sessionState.pendingPlannerQuestion !== null) {
+      const plannerSession = this._plannerSessions.get(sessionId);
+      if (plannerSession) {
+        const userText = extractTextFromContent(content);
+        await this._resumePlannerWithAnswer(sessionId, sessionState, userText, plannerSession);
+        return;
+      }
+      sessionState.pendingPlannerQuestion = null;
+    }
+
     await this.catalog.recheckUnreachable();
 
     const available = this.catalog.getAvailable();
@@ -348,6 +359,7 @@ export class Foreman {
             await plannerSession.open(userText);
 
             const plan = plannerSession.getPlan();
+            const pendingQuestion = plannerSession.getPendingQuestion();
             sessionState.planOwnerRef = {
               kind: 'external',
               taskId: plannerSession.taskId ?? '',
@@ -362,6 +374,19 @@ export class Foreman {
               sessionState.activePlan = plan;
               return 'Plan received. Executing subtasks.';
             }
+
+            if (pendingQuestion) {
+              // Planner asked a question — forward to user and pause.
+              sessionState.pendingPlannerQuestion = pendingQuestion;
+              sessionState.originatorIntent = userText;
+              await this.acpServer.sendUpdate(sessionId, [
+                { type: 'text', text: `[planner] ${pendingQuestion}` },
+              ]);
+              // Abort the LLM loop so we don't dispatch workers with no plan.
+              sessionState.abortController?.abort();
+              return '[Planner awaiting user input — respond in next message]';
+            }
+
             return 'Planner did not return a valid plan.';
           },
           { forceWrite: true },
@@ -705,6 +730,48 @@ export class Foreman {
     }
 
     return summary || content;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Planner question resume
+  // ---------------------------------------------------------------------------
+
+  private async _resumePlannerWithAnswer(
+    sessionId: string,
+    sessionState: SessionState,
+    answer: string,
+    plannerSession: PlannerSession,
+  ): Promise<void> {
+    sessionState.pendingPlannerQuestion = null;
+    await plannerSession.resumeWithAnswer(answer);
+
+    const plan = plannerSession.getPlan();
+    const nextQuestion = plannerSession.getPendingQuestion();
+
+    if (nextQuestion) {
+      sessionState.pendingPlannerQuestion = nextQuestion;
+      await this.acpServer.sendUpdate(sessionId, [
+        { type: 'text', text: `[planner] ${nextQuestion}` },
+      ]);
+      return;
+    }
+
+    if (plan) {
+      sessionState.activePlan = plan;
+      const intent = sessionState.originatorIntent ?? '';
+      sessionState.originatorIntent = null;
+      await this.catalog.recheckUnreachable();
+      const available = this.catalog.getAvailable();
+      await this._executePlan(plan, sessionId, sessionState, intent, available);
+    } else {
+      const summary = await this._synthesize(['Planner did not return a valid plan.'], '');
+      await this.acpServer.sendUpdate(sessionId, [{ type: 'text', text: summary }]);
+      const plannerSess = this._plannerSessions.get(sessionId);
+      if (plannerSess) {
+        await plannerSess.close().catch(() => {});
+        this._plannerSessions.delete(sessionId);
+      }
+    }
   }
 
   // ---------------------------------------------------------------------------
