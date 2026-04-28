@@ -17,6 +17,8 @@ import type {
   ContentChunk,
   ToolCall,
   Plan,
+  CurrentModeUpdate,
+  SessionModeState,
 } from '@agentclientprotocol/sdk';
 import type {
   ACPClientManager,
@@ -33,6 +35,7 @@ import { DefaultSubprocessHandle } from './subprocess-handle.js';
 import { DefaultSessionHandle } from './session-handle.js';
 import { mapDecisionToAcpResponse } from '../a2a/mappers.js';
 import { logger } from '../logger.js';
+import { isBlockedModeId, pickFallbackMode } from './mode-policy.js';
 
 // ---------------------------------------------------------------------------
 // Internal async queue
@@ -138,6 +141,10 @@ function toolKindToAcpType(kind: string | null | undefined): ACPPermissionReques
 export class DefaultACPClientManager implements ACPClientManager {
   // One queue per active session (set when sendPrompt is called, cleared in finally)
   private readonly sessionQueues = new Map<string, AsyncQueue<PromptEvent>>();
+  private readonly sessionModeStates = new Map<string, SessionModeState>();
+  private readonly sessionSubprocesses = new Map<string, DefaultSubprocessHandle>();
+  private readonly forcedExitAttempts = new Map<string, number>();
+  private static readonly MAX_FORCED_EXITS = 3;
 
   async spawnSubprocess(
     command: string,
@@ -183,6 +190,21 @@ export class DefaultACPClientManager implements ACPClientManager {
             const entries = (update as Plan).entries;
             logger.debug({ sessionId: params.sessionId, updateType, entryCount: entries?.length }, 'ACP sessionUpdate received');
             queue.push({ kind: 'plan', entries });
+          } else if (update.sessionUpdate === 'current_mode_update') {
+            const modeUpdate = update as CurrentModeUpdate;
+            const cached = self.sessionModeStates.get(params.sessionId);
+            if (cached) {
+              self.sessionModeStates.set(params.sessionId, { ...cached, currentModeId: modeUpdate.currentModeId });
+            }
+            if (isBlockedModeId(modeUpdate.currentModeId)) {
+              logger.warn(
+                { sessionId: params.sessionId, modeId: modeUpdate.currentModeId },
+                'agent switched to blocked mode mid-session; switching back',
+              );
+              void self.forceExitBlockedMode(params.sessionId);
+            } else {
+              logger.debug({ sessionId: params.sessionId, modeId: modeUpdate.currentModeId }, 'mode change accepted');
+            }
           } else {
             logger.debug({ sessionId: params.sessionId, updateType }, 'ACP sessionUpdate received (ignored)');
           }
@@ -217,6 +239,37 @@ export class DefaultACPClientManager implements ACPClientManager {
       mcpServers: mcpServers.map(specToSdkMcpServer),
       ...(meta ? { _meta: meta } : {}),
     });
+
+    if (resp.modes) {
+      this.sessionModeStates.set(resp.sessionId, resp.modes);
+      this.sessionSubprocesses.set(resp.sessionId, handle);
+
+      if (isBlockedModeId(resp.modes.currentModeId)) {
+        const target = pickFallbackMode(resp.modes.availableModes);
+        if (target) {
+          logger.info(
+            { sessionId: resp.sessionId, from: resp.modes.currentModeId, to: target },
+            'agent started in blocked mode; switching',
+          );
+          try {
+            await handle.connection.setSessionMode({ sessionId: resp.sessionId, modeId: target });
+            this.sessionModeStates.set(resp.sessionId, { ...resp.modes, currentModeId: target });
+          } catch (err) {
+            logger.error({ sessionId: resp.sessionId, err: String(err) }, 'failed to switch out of blocked mode');
+          }
+        } else {
+          logger.warn(
+            {
+              sessionId: resp.sessionId,
+              modeId: resp.modes.currentModeId,
+              available: resp.modes.availableModes.map((m: { id: string }) => m.id),
+            },
+            'agent in blocked mode but no acceptable fallback available',
+          );
+        }
+      }
+    }
+
     return new DefaultSessionHandle(resp.sessionId, handle);
   }
 
@@ -243,6 +296,9 @@ export class DefaultACPClientManager implements ACPClientManager {
       .finally(() => {
         queue.close();
         this.sessionQueues.delete(sessionId);
+        this.sessionModeStates.delete(sessionId);
+        this.sessionSubprocesses.delete(sessionId);
+        this.forcedExitAttempts.delete(sessionId);
       });
 
     return queue[Symbol.asyncIterator]();
@@ -251,6 +307,41 @@ export class DefaultACPClientManager implements ACPClientManager {
   async cancelSession(session: SessionHandle): Promise<void> {
     const handle = session as DefaultSessionHandle;
     await handle.subprocessHandle.connection.cancel({ sessionId: session.getId() });
+  }
+
+  private async forceExitBlockedMode(sessionId: string): Promise<void> {
+    const attempts = (this.forcedExitAttempts.get(sessionId) ?? 0) + 1;
+    if (attempts > DefaultACPClientManager.MAX_FORCED_EXITS) {
+      logger.error({ sessionId, attempts }, 'agent keeps re-entering blocked mode; giving up');
+      return;
+    }
+    this.forcedExitAttempts.set(sessionId, attempts);
+
+    const cached = this.sessionModeStates.get(sessionId);
+    if (!cached) {
+      logger.warn({ sessionId }, 'cannot force mode exit — no cached mode state');
+      return;
+    }
+
+    const target = pickFallbackMode(cached.availableModes);
+    if (!target) {
+      logger.warn({ sessionId }, 'cannot force mode exit — no acceptable fallback');
+      return;
+    }
+
+    const subprocess = this.sessionSubprocesses.get(sessionId);
+    if (!subprocess) {
+      logger.warn({ sessionId }, 'cannot force mode exit — subprocess not found');
+      return;
+    }
+
+    try {
+      await subprocess.connection.setSessionMode({ sessionId, modeId: target });
+      this.sessionModeStates.set(sessionId, { ...cached, currentModeId: target });
+      logger.info({ sessionId, from: cached.currentModeId, to: target }, 'forced mode exit succeeded');
+    } catch (err) {
+      logger.error({ sessionId, err: String(err) }, 'forced mode exit failed');
+    }
   }
 
   private async dispatchPermission(

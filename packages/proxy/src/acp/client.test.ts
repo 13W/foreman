@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => {
     newSession: vi.fn().mockResolvedValue({ sessionId: 'test-session-id' }),
     prompt: vi.fn().mockResolvedValue({ stopReason: 'end_turn' }),
     cancel: vi.fn().mockResolvedValue(undefined),
+    setSessionMode: vi.fn().mockResolvedValue({}),
     get closed() {
       return Promise.resolve();
     },
@@ -182,6 +183,57 @@ describe('DefaultACPClientManager', () => {
         }),
       );
     });
+
+    it('calls setSessionMode when agent starts in blocked plan mode', async () => {
+      mocks.connection.newSession.mockResolvedValueOnce({
+        sessionId: 'test-session-id',
+        modes: {
+          currentModeId: 'plan',
+          availableModes: [
+            { id: 'plan', name: 'Plan' },
+            { id: 'normal', name: 'Normal' },
+          ],
+        },
+      });
+      const subprocess = await manager.spawnSubprocess('agent', []);
+      await manager.createSession(subprocess, '/tmp', []);
+      expect(mocks.connection.setSessionMode).toHaveBeenCalledWith(
+        expect.objectContaining({ sessionId: 'test-session-id', modeId: 'normal' }),
+      );
+    });
+
+    it('does not call setSessionMode when agent starts in a non-blocked mode', async () => {
+      mocks.connection.newSession.mockResolvedValueOnce({
+        sessionId: 'test-session-id',
+        modes: {
+          currentModeId: 'default',
+          availableModes: [{ id: 'default', name: 'Default' }, { id: 'plan', name: 'Plan' }],
+        },
+      });
+      const subprocess = await manager.spawnSubprocess('agent', []);
+      await manager.createSession(subprocess, '/tmp', []);
+      expect(mocks.connection.setSessionMode).not.toHaveBeenCalled();
+    });
+
+    it('does not call setSessionMode when agent advertises no modes', async () => {
+      // default mock returns no modes field
+      const subprocess = await manager.spawnSubprocess('agent', []);
+      await manager.createSession(subprocess, '/tmp', []);
+      expect(mocks.connection.setSessionMode).not.toHaveBeenCalled();
+    });
+
+    it('logs warning and skips switching when only blocked modes are available', async () => {
+      mocks.connection.newSession.mockResolvedValueOnce({
+        sessionId: 'test-session-id',
+        modes: {
+          currentModeId: 'plan',
+          availableModes: [{ id: 'plan', name: 'Plan' }],
+        },
+      });
+      const subprocess = await manager.spawnSubprocess('agent', []);
+      await manager.createSession(subprocess, '/tmp', []);
+      expect(mocks.connection.setSessionMode).not.toHaveBeenCalled();
+    });
   });
 
   // ---- sendPrompt ------------------------------------------------------------
@@ -312,6 +364,118 @@ describe('DefaultACPClientManager', () => {
 
       const [permResponse] = await Promise.all([permissionPromise, consumerPromise]);
       expect(permResponse).toBeDefined();
+    });
+  });
+
+  // ---- mode switching (current_mode_update) ----------------------------------
+
+  describe('mode switching', () => {
+    it('calls setSessionMode when a current_mode_update switches to a blocked mode', async () => {
+      mocks.connection.newSession.mockResolvedValueOnce({
+        sessionId: 'test-session-id',
+        modes: {
+          currentModeId: 'default',
+          availableModes: [
+            { id: 'default', name: 'Default' },
+            { id: 'plan', name: 'Plan' },
+          ],
+        },
+      });
+      let promptResolve!: (value: unknown) => void;
+      mocks.connection.prompt.mockReturnValueOnce(
+        new Promise((resolve) => { promptResolve = resolve; }),
+      );
+
+      const subprocess = await manager.spawnSubprocess('agent', []);
+      const session = await manager.createSession(subprocess, '/tmp', []);
+      const stream = manager.sendPrompt(session, []);
+      const collectPromise = collectEvents(stream);
+
+      const client = getClient();
+
+      await client.sessionUpdate({
+        sessionId: 'test-session-id',
+        update: { sessionUpdate: 'current_mode_update', currentModeId: 'plan' },
+      });
+
+      // flush microtasks so the fire-and-forget setSessionMode call executes
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(mocks.connection.setSessionMode).toHaveBeenCalledWith(
+        expect.objectContaining({ sessionId: 'test-session-id', modeId: 'default' }),
+      );
+
+      promptResolve({ stopReason: 'end_turn' });
+      await collectPromise;
+    });
+
+    it('does not call setSessionMode for a current_mode_update to a non-blocked mode', async () => {
+      mocks.connection.newSession.mockResolvedValueOnce({
+        sessionId: 'test-session-id',
+        modes: { currentModeId: 'default', availableModes: [{ id: 'default', name: 'Default' }] },
+      });
+      let promptResolve!: (value: unknown) => void;
+      mocks.connection.prompt.mockReturnValueOnce(
+        new Promise((resolve) => { promptResolve = resolve; }),
+      );
+
+      const subprocess = await manager.spawnSubprocess('agent', []);
+      const session = await manager.createSession(subprocess, '/tmp', []);
+      const stream = manager.sendPrompt(session, []);
+      const collectPromise = collectEvents(stream);
+
+      const client = getClient();
+
+      await client.sessionUpdate({
+        sessionId: 'test-session-id',
+        update: { sessionUpdate: 'current_mode_update', currentModeId: 'default' },
+      });
+
+      await Promise.resolve();
+      expect(mocks.connection.setSessionMode).not.toHaveBeenCalled();
+
+      promptResolve({ stopReason: 'end_turn' });
+      await collectPromise;
+    });
+
+    it('stops forcing exit after MAX_FORCED_EXITS attempts', async () => {
+      mocks.connection.newSession.mockResolvedValueOnce({
+        sessionId: 'test-session-id',
+        modes: {
+          currentModeId: 'default',
+          availableModes: [
+            { id: 'default', name: 'Default' },
+            { id: 'plan', name: 'Plan' },
+          ],
+        },
+      });
+      let promptResolve!: (value: unknown) => void;
+      mocks.connection.prompt.mockReturnValueOnce(
+        new Promise((resolve) => { promptResolve = resolve; }),
+      );
+
+      const subprocess = await manager.spawnSubprocess('agent', []);
+      const session = await manager.createSession(subprocess, '/tmp', []);
+      const stream = manager.sendPrompt(session, []);
+      const collectPromise = collectEvents(stream);
+
+      const client = getClient();
+
+      // Trigger blocked mode 4 times — only 3 setSessionMode calls should happen
+      for (let i = 0; i < 4; i++) {
+        await client.sessionUpdate({
+          sessionId: 'test-session-id',
+          update: { sessionUpdate: 'current_mode_update', currentModeId: 'plan' },
+        });
+        await Promise.resolve();
+        await Promise.resolve();
+      }
+
+      expect(mocks.connection.setSessionMode).toHaveBeenCalledTimes(3);
+
+      promptResolve({ stopReason: 'end_turn' });
+      await collectPromise;
     });
   });
 
