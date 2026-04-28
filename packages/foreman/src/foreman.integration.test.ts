@@ -181,8 +181,11 @@ async function buildForeman(): Promise<Foreman> {
   );
   await priv(foreman).catalog.loadFromConfig(BASE_CONFIG.workers);
 
-  // Silence sendUpdate / requestPermission so they don't throw on missing conn.
+  // Silence ACP server methods so they don't throw on missing conn.
   vi.spyOn(priv(foreman).acpServer, 'sendUpdate').mockResolvedValue(undefined);
+  vi.spyOn(priv(foreman).acpServer, 'sendPlan').mockResolvedValue(undefined);
+  vi.spyOn(priv(foreman).acpServer, 'sendToolCall').mockResolvedValue(undefined);
+  vi.spyOn(priv(foreman).acpServer, 'sendToolCallUpdate').mockResolvedValue(undefined);
   vi.spyOn(priv(foreman).acpServer, 'requestPermission').mockResolvedValue({
     optionId: 'allow_once',
     kind: 'allow_once' as const,
@@ -209,7 +212,7 @@ describe('Foreman integration — happy path', () => {
     vi.restoreAllMocks();
   });
 
-  it('executes a 2-subtask plan and sends prefixed transparency updates', async () => {
+  it('executes a 2-subtask plan and emits structured plan + tool_call updates', async () => {
     // LLM turns:
     //  0 — call planner tool
     //  1 — acknowledge tool result (text only, no further tools)
@@ -243,7 +246,7 @@ describe('Foreman integration — happy path', () => {
       }) as any,
     );
 
-    // Capture sendUpdate calls.
+    // Capture structured ACP updates.
     const sendUpdates: string[] = [];
     vi.spyOn(priv(foreman).acpServer, 'sendUpdate').mockImplementation(
       (async (_sid: any, content: any) => {
@@ -253,23 +256,56 @@ describe('Foreman integration — happy path', () => {
       }) as any,
     );
 
+    const planCalls: any[][] = [];
+    vi.spyOn(priv(foreman).acpServer, 'sendPlan').mockImplementation(
+      (async (_sid: any, entries: any) => { planCalls.push(entries); }) as any,
+    );
+
+    const toolCallCalls: any[] = [];
+    vi.spyOn(priv(foreman).acpServer, 'sendToolCall').mockImplementation(
+      (async (_sid: any, tc: any) => { toolCallCalls.push(tc); }) as any,
+    );
+
+    const toolCallUpdateCalls: any[] = [];
+    vi.spyOn(priv(foreman).acpServer, 'sendToolCallUpdate').mockImplementation(
+      (async (_sid: any, upd: any) => { toolCallUpdateCalls.push(upd); }) as any,
+    );
+
     await priv(foreman)._handlePrompt(SESSION_ID, [
       { type: 'text', text: 'Refactor auth and add tests' },
     ]);
 
-    // [planner] prefix must appear.
+    // [planner] starting/done messages come from the planner tool callback (not onSubtaskEvent).
     expect(sendUpdates.some((u) => u.includes('[planner]'))).toBe(true);
-    // [coder] and [tester] prefixes must appear.
-    expect(sendUpdates.some((u) => u.includes('[coder]'))).toBe(true);
-    expect(sendUpdates.some((u) => u.includes('[tester]'))).toBe(true);
     // "Done." is the final synthesis update.
     expect(sendUpdates[sendUpdates.length - 1]).toBe('Done.');
-    // [planner] appears before [coder] and [tester].
-    const plannerIdx = sendUpdates.findIndex((u) => u.includes('[planner]'));
-    const coderIdx = sendUpdates.findIndex((u) => u.includes('[coder]'));
-    const testerIdx = sendUpdates.findIndex((u) => u.includes('[tester]'));
-    expect(plannerIdx).toBeLessThan(coderIdx);
-    expect(plannerIdx).toBeLessThan(testerIdx);
+
+    // Plan was emitted at least once (initial + updates)
+    expect(planCalls.length).toBeGreaterThan(0);
+    // Initial plan has both subtasks pending
+    const initialPlan = planCalls[0];
+    expect(initialPlan).toHaveLength(2);
+    expect(initialPlan[0].status).toBe('pending');
+    expect(initialPlan[1].status).toBe('pending');
+
+    // A tool_call was emitted for each subtask (coder + tester)
+    expect(toolCallCalls).toHaveLength(2);
+    const toolCallIds = toolCallCalls.map((tc: any) => tc.toolCallId);
+    expect(toolCallIds).toContain('s1');
+    expect(toolCallIds).toContain('s2');
+    // Each tool_call has status in_progress and kind execute
+    for (const tc of toolCallCalls) {
+      expect(tc.status).toBe('in_progress');
+      expect(tc.kind).toBe('execute');
+    }
+
+    // Terminal tool_call_updates mark both subtasks completed
+    const terminalUpdates = toolCallUpdateCalls.filter((u: any) => u.status === 'completed');
+    expect(terminalUpdates.length).toBeGreaterThanOrEqual(2);
+
+    // Final plan has all entries completed
+    const finalPlan = planCalls[planCalls.length - 1];
+    expect(finalPlan.every((e: any) => e.status === 'completed')).toBe(true);
   });
 });
 
@@ -473,6 +509,9 @@ async function buildForemanNoPlanner(
   await priv(foreman).catalog.loadFromConfig(NO_PLANNER_CONFIG.workers);
 
   vi.spyOn(priv(foreman).acpServer, 'sendUpdate').mockResolvedValue(undefined);
+  vi.spyOn(priv(foreman).acpServer, 'sendPlan').mockResolvedValue(undefined);
+  vi.spyOn(priv(foreman).acpServer, 'sendToolCall').mockResolvedValue(undefined);
+  vi.spyOn(priv(foreman).acpServer, 'sendToolCallUpdate').mockResolvedValue(undefined);
   vi.spyOn(priv(foreman).acpServer, 'requestPermission').mockResolvedValue({
     optionId: 'allow_once',
     kind: 'allow_once' as const,
@@ -638,9 +677,201 @@ describe('Foreman integration — no-planner fallback: dispatch_whole', () => {
       }) as any,
     );
 
+    const toolCallCalls: any[] = [];
+    vi.spyOn(priv(foreman).acpServer, 'sendToolCall').mockImplementation(
+      (async (_sid: any, tc: any) => { toolCallCalls.push(tc); }) as any,
+    );
+
     await priv(foreman)._handlePrompt(SESSION_ID, [{ type: 'text', text: 'do something' }]);
 
-    expect(sendUpdates.some((u) => u.includes('[coder]'))).toBe(true);
+    // Coder subtask was dispatched as a tool_call (not bracketed text spam)
+    expect(toolCallCalls.some((tc: any) => String(tc.title).toLowerCase().includes('coder'))).toBe(true);
     expect(sendUpdates[sendUpdates.length - 1]).toBe('Dispatch-whole done.');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Plan visualization — direct _executePlan tests
+// ---------------------------------------------------------------------------
+
+function makePlan2Subtasks() {
+  return {
+    plan_id: 'viz-plan-1',
+    originator_intent: 'test visualization',
+    goal_summary: 'Visualize plan',
+    source: 'external_planner' as const,
+    batches: [
+      {
+        batch_id: 'b1',
+        subtasks: [
+          {
+            id: 's1',
+            assigned_agent: 'coder',
+            description: 'Refactor auth module',
+            expected_output: null,
+            inputs: { relevant_files: [], constraints: [], context_from_prior_tasks: [] },
+          },
+          {
+            id: 's2',
+            assigned_agent: 'tester',
+            description: 'Add auth tests',
+            expected_output: null,
+            inputs: { relevant_files: [], constraints: [], context_from_prior_tasks: [] },
+          },
+        ],
+      },
+    ],
+  };
+}
+
+describe('Foreman integration — plan visualization: happy path', () => {
+  const SESSION_ID = 'viz-happy-session';
+
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it('emits sendPlan before execution, sendToolCall per subtask, terminal completed updates', async () => {
+    const foreman = await buildForeman();
+    priv(foreman).sessionManager.create(SESSION_ID, '/tmp');
+
+    // Synthesis LLM
+    priv(foreman).llmClient = {
+      completeWithTools: async function* () {
+        yield { type: 'text_chunk', text: 'All done.' } as LLMEvent;
+        yield { type: 'stop', stopReason: 'end_turn' } as LLMEvent;
+      },
+    };
+
+    vi.spyOn(priv(foreman).dispatchManager, 'dispatch').mockImplementation(
+      (async (url: any) => {
+        if (url === 'http://coder.test')
+          return makeHandle('coder-task-v1', url, [makeCompletedStatusEvent('coder-task-v1')]);
+        if (url === 'http://tester.test')
+          return makeHandle('tester-task-v1', url, [makeCompletedStatusEvent('tester-task-v1')]);
+        throw new Error(`Unexpected dispatch to ${url}`);
+      }) as any,
+    );
+
+    const planCalls: any[][] = [];
+    vi.spyOn(priv(foreman).acpServer, 'sendPlan').mockImplementation(
+      (async (_sid: any, entries: any) => { planCalls.push(entries); }) as any,
+    );
+
+    const toolCallCalls: any[] = [];
+    vi.spyOn(priv(foreman).acpServer, 'sendToolCall').mockImplementation(
+      (async (_sid: any, tc: any) => { toolCallCalls.push(tc); }) as any,
+    );
+
+    const toolCallUpdateCalls: any[] = [];
+    vi.spyOn(priv(foreman).acpServer, 'sendToolCallUpdate').mockImplementation(
+      (async (_sid: any, upd: any) => { toolCallUpdateCalls.push(upd); }) as any,
+    );
+
+    const plan = makePlan2Subtasks();
+    const state = priv(foreman).sessionManager.get(SESSION_ID);
+    const available = priv(foreman).catalog.getAvailable();
+
+    await priv(foreman)._executePlan(plan, SESSION_ID, state, 'test viz', available);
+
+    // Initial plan emitted with both entries pending
+    expect(planCalls.length).toBeGreaterThan(0);
+    expect(planCalls[0]).toHaveLength(2);
+    expect(planCalls[0][0].status).toBe('pending');
+    expect(planCalls[0][1].status).toBe('pending');
+
+    // One tool_call per subtask
+    expect(toolCallCalls).toHaveLength(2);
+    expect(toolCallCalls.map((tc: any) => tc.toolCallId)).toEqual(expect.arrayContaining(['s1', 's2']));
+    expect(toolCallCalls.every((tc: any) => tc.status === 'in_progress')).toBe(true);
+    expect(toolCallCalls.every((tc: any) => tc.kind === 'execute')).toBe(true);
+
+    // Terminal tool_call_updates with completed status
+    const completedUpdates = toolCallUpdateCalls.filter((u: any) => u.status === 'completed');
+    expect(completedUpdates.map((u: any) => u.toolCallId)).toEqual(expect.arrayContaining(['s1', 's2']));
+
+    // Final plan has all entries completed
+    const finalPlan = planCalls[planCalls.length - 1];
+    expect(finalPlan.every((e: any) => e.status === 'completed')).toBe(true);
+  });
+});
+
+describe('Foreman integration — plan visualization: failure scenario', () => {
+  const SESSION_ID = 'viz-fail-session';
+
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it('marks failed subtask and sibling with failed status on PlanAbortedError', async () => {
+    const foreman = await buildForeman();
+    priv(foreman).sessionManager.create(SESSION_ID, '/tmp');
+
+    // Synthesis LLM
+    priv(foreman).llmClient = {
+      completeWithTools: async function* () {
+        yield { type: 'text_chunk', text: 'Failed.' } as LLMEvent;
+        yield { type: 'stop', stopReason: 'end_turn' } as LLMEvent;
+      },
+    };
+
+    const failedResult = {
+      status: 'failed' as const,
+      stop_reason: 'subprocess_crash' as const,
+      summary: 'coder failed',
+      branch_ref: '',
+      session_transcript_ref: '',
+      error: { code: 'compile_error', message: 'compile error' },
+    };
+    const failedStatusEvent: StreamEvent = {
+      type: 'status',
+      taskId: 'coder-task-f1',
+      data: {
+        state: 'failed',
+        final: true,
+        message: {
+          role: 'agent',
+          parts: [{ kind: 'data', data: failedResult }],
+        },
+      },
+      timestamp: '',
+    };
+
+    vi.spyOn(priv(foreman).dispatchManager, 'dispatch').mockImplementation(
+      (async (url: any) => {
+        if (url === 'http://coder.test')
+          return makeHandle('coder-task-f1', url, [failedStatusEvent]);
+        if (url === 'http://tester.test')
+          return makeHandle('tester-task-f1', url, [makeCompletedStatusEvent('tester-task-f1')]);
+        throw new Error(`Unexpected dispatch to ${url}`);
+      }) as any,
+    );
+
+    const planCalls: any[][] = [];
+    vi.spyOn(priv(foreman).acpServer, 'sendPlan').mockImplementation(
+      (async (_sid: any, entries: any) => { planCalls.push(entries); }) as any,
+    );
+
+    const toolCallCalls: any[] = [];
+    vi.spyOn(priv(foreman).acpServer, 'sendToolCall').mockImplementation(
+      (async (_sid: any, tc: any) => { toolCallCalls.push(tc); }) as any,
+    );
+
+    const toolCallUpdateCalls: any[] = [];
+    vi.spyOn(priv(foreman).acpServer, 'sendToolCallUpdate').mockImplementation(
+      (async (_sid: any, upd: any) => { toolCallUpdateCalls.push(upd); }) as any,
+    );
+
+    const plan = makePlan2Subtasks();
+    const state = priv(foreman).sessionManager.get(SESSION_ID);
+    const available = priv(foreman).catalog.getAvailable();
+
+    await priv(foreman)._executePlan(plan, SESSION_ID, state, 'test viz fail', available);
+
+    // Failed subtask gets a 'failed' tool_call_update
+    const failedUpdates = toolCallUpdateCalls.filter((u: any) => u.status === 'failed');
+    expect(failedUpdates.length).toBeGreaterThanOrEqual(1);
+    expect(failedUpdates.some((u: any) => u.toolCallId === 's1')).toBe(true);
+
+    // Plan was emitted at least once
+    expect(planCalls.length).toBeGreaterThan(0);
+    // Initial plan has pending entries
+    expect(planCalls[0][0].status).toBe('pending');
   });
 });

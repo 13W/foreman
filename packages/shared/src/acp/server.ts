@@ -1,4 +1,4 @@
-import type { ContentBlock, PermissionOption } from '@agentclientprotocol/sdk';
+import type { ContentBlock, PermissionOption, PlanEntry, ToolCall, ToolCallUpdate } from '@agentclientprotocol/sdk';
 import type { ACPPermissionRequest, ACPTransport } from './types.js';
 
 export type InitializeHandler = () => void | Promise<void>;
@@ -34,6 +34,24 @@ export interface ACPAgentServer {
 
   /** Push a streaming content update to the client for the given session. */
   sendUpdate(sessionId: string, content: ContentBlock[]): void | Promise<void>;
+
+  /**
+   * Send a plan update. Replaces the entire plan in the client UI.
+   * Per ACP spec, the agent must send all entries with each update; the client does not merge.
+   */
+  sendPlan(sessionId: string, entries: PlanEntry[]): Promise<void>;
+
+  /**
+   * Send a tool_call sessionUpdate (typically when a tool call starts).
+   * Caller chooses the toolCallId — must be unique within the session.
+   */
+  sendToolCall(sessionId: string, toolCall: ToolCall): Promise<void>;
+
+  /**
+   * Send a tool_call_update (incremental update by id).
+   * Pass only fields that changed. Status/title/content/rawOutput most common.
+   */
+  sendToolCallUpdate(sessionId: string, update: ToolCallUpdate): Promise<void>;
 
   /**
    * Request a permission decision from the client for the given session.

@@ -1,4 +1,4 @@
-import type { ContentBlock } from '@agentclientprotocol/sdk';
+import type { ContentBlock, PlanEntry } from '@agentclientprotocol/sdk';
 import type { ForemanConfig } from './config.js';
 import { createLogger } from './logger.js';
 import type { MsgLogger } from './msg-logger.js';
@@ -23,7 +23,6 @@ import type {
   Plan as PlanType,
   PermissionDecision,
   PermissionRequest,
-  StreamEvent,
   TaskPayload,
   TaskResult as TaskResultType,
 } from '@foreman-stack/shared';
@@ -495,6 +494,7 @@ export class Foreman {
     available: WorkerCatalogEntry[],
   ): Promise<void> {
     const subtaskWorkerNames = new Map<string, string>();
+    const subtaskDescriptions = new Map<string, string>();
     for (const batch of plan.batches) {
       for (const subtask of batch.subtasks) {
         const worker = available.find(
@@ -503,9 +503,37 @@ export class Foreman {
             w.agent_card?.name === subtask.assigned_agent,
         );
         subtaskWorkerNames.set(subtask.id, worker?.agent_card?.name ?? subtask.assigned_agent);
+        subtaskDescriptions.set(subtask.id, subtask.description ?? subtask.id);
       }
     }
-    const seenSubtasks = new Set<string>();
+
+    // Build ACP plan entries for visualization
+    const planEntries: PlanEntry[] = [];
+    const subtaskEntryIndex = new Map<string, number>();
+    for (const batch of plan.batches) {
+      for (const subtask of batch.subtasks) {
+        const idx = planEntries.length;
+        subtaskEntryIndex.set(subtask.id, idx);
+        planEntries.push({
+          content: subtask.description ?? subtask.id,
+          priority: 'medium',
+          status: 'pending',
+          _meta: {
+            subtaskId: subtask.id,
+            assignedAgent: subtask.assigned_agent,
+            workerName: subtaskWorkerNames.get(subtask.id) ?? subtask.assigned_agent,
+            batchId: batch.batch_id,
+          },
+        });
+      }
+    }
+
+    this.acpServer
+      .sendPlan(sessionId, [...planEntries])
+      .catch((err: unknown) => this.logger.warn({ err: String(err) }, 'sendPlan failed'));
+
+    const subtaskTextBuffers = new Map<string, string>();
+    const subtaskStarted = new Set<string>();
 
     const executor = new PlanExecutor({
       dispatchManager: this.dispatchManager,
@@ -518,21 +546,49 @@ export class Foreman {
       },
       onSubtaskEvent: (subtaskId, event) => {
         const workerName = subtaskWorkerNames.get(subtaskId) ?? subtaskId;
-        if (!seenSubtasks.has(subtaskId)) {
-          seenSubtasks.add(subtaskId);
+        const description = subtaskDescriptions.get(subtaskId) ?? subtaskId;
+
+        // First event for this subtask → open tool_call card and transition plan entry
+        if (!subtaskStarted.has(subtaskId)) {
+          subtaskStarted.add(subtaskId);
           this.acpServer
-            .sendUpdate(sessionId, [{ type: 'text', text: `[${workerName}] starting...` }])
+            .sendToolCall(sessionId, {
+              toolCallId: subtaskId,
+              title: `${workerName}: ${description}`.slice(0, 200),
+              status: 'in_progress',
+              kind: 'execute',
+              rawInput: { subtaskId, assignedAgent: workerName },
+            })
             .catch((err: unknown) =>
-              this.logger.warn({ err: String(err) }, 'transparency send failed'),
+              this.logger.warn({ err: String(err) }, 'sendToolCall failed'),
             );
+
+          const idx = subtaskEntryIndex.get(subtaskId);
+          if (idx !== undefined) {
+            planEntries[idx] = { ...planEntries[idx], status: 'in_progress' };
+            this.acpServer
+              .sendPlan(sessionId, [...planEntries])
+              .catch((err: unknown) =>
+                this.logger.warn({ err: String(err) }, 'sendPlan update failed'),
+              );
+          }
         }
-        const update = this._transparencyText(workerName, event);
-        if (update) {
-          this.acpServer
-            .sendUpdate(sessionId, [{ type: 'text', text: update }])
-            .catch((err: unknown) =>
-              this.logger.warn({ err: String(err) }, 'transparency send failed'),
-            );
+
+        // Stream worker text into the tool_call content (full buffer replace per ACP spec)
+        if (event.type === 'message') {
+          const text = extractMessageText(event);
+          if (text) {
+            const buf = (subtaskTextBuffers.get(subtaskId) ?? '') + text;
+            subtaskTextBuffers.set(subtaskId, buf);
+            this.acpServer
+              .sendToolCallUpdate(sessionId, {
+                toolCallId: subtaskId,
+                content: [{ type: 'content', content: { type: 'text', text: buf } }],
+              })
+              .catch((err: unknown) =>
+                this.logger.warn({ err: String(err) }, 'sendToolCallUpdate failed'),
+              );
+          }
         }
       },
     });
@@ -543,6 +599,24 @@ export class Foreman {
       results = subtaskResults.map(
         ({ subtaskId, result }) => `[${subtaskId}] ${JSON.stringify(result)}`,
       );
+
+      // Terminal: mark all completed subtasks
+      for (const { subtaskId } of subtaskResults) {
+        this.acpServer
+          .sendToolCallUpdate(sessionId, { toolCallId: subtaskId, status: 'completed' })
+          .catch((err: unknown) =>
+            this.logger.warn({ err: String(err) }, 'sendToolCallUpdate completed failed'),
+          );
+        const idx = subtaskEntryIndex.get(subtaskId);
+        if (idx !== undefined) {
+          planEntries[idx] = { ...planEntries[idx], status: 'completed' };
+        }
+      }
+      this.acpServer
+        .sendPlan(sessionId, [...planEntries])
+        .catch((err: unknown) =>
+          this.logger.warn({ err: String(err) }, 'sendPlan terminal failed'),
+        );
     } catch (err) {
       let failureInfo: string;
       if (err instanceof PlanAbortedError) {
@@ -553,6 +627,45 @@ export class Foreman {
           { sessionId, subtaskId: err.subtaskId, status: err.taskResult.status, detail },
           'plan execution aborted',
         );
+
+        // Mark failed subtask
+        this.acpServer
+          .sendToolCallUpdate(sessionId, { toolCallId: err.subtaskId, status: 'failed' })
+          .catch((erx: unknown) =>
+            this.logger.warn({ err: String(erx) }, 'sendToolCallUpdate failed-subtask error'),
+          );
+        const failedIdx = subtaskEntryIndex.get(err.subtaskId);
+        if (failedIdx !== undefined) {
+          planEntries[failedIdx] = {
+            ...planEntries[failedIdx],
+            status: 'completed',
+            _meta: { ...(planEntries[failedIdx]._meta ?? {}), failed: true },
+          };
+        }
+
+        // Mark sibling subtasks that had started
+        for (const startedId of subtaskStarted) {
+          if (startedId === err.subtaskId) continue;
+          this.acpServer
+            .sendToolCallUpdate(sessionId, {
+              toolCallId: startedId,
+              status: 'failed',
+              content: [{ type: 'content', content: { type: 'text', text: 'cancelled due to sibling failure' } }],
+            })
+            .catch((erx: unknown) =>
+              this.logger.warn({ err: String(erx) }, 'sendToolCallUpdate sibling cancel error'),
+            );
+          const sibIdx = subtaskEntryIndex.get(startedId);
+          if (sibIdx !== undefined) {
+            planEntries[sibIdx] = { ...planEntries[sibIdx], status: 'completed' };
+          }
+        }
+
+        this.acpServer
+          .sendPlan(sessionId, [...planEntries])
+          .catch((erx: unknown) =>
+            this.logger.warn({ err: String(erx) }, 'sendPlan abort failed'),
+          );
       } else {
         failureInfo = `Plan execution failed: ${err instanceof Error ? err.message : String(err)}`;
         this.logger.error({ sessionId, err: String(err) }, 'plan execution failed');
@@ -693,27 +806,6 @@ export class Foreman {
     });
     const decision = mapPermissionOptionToDecision(option);
     await this.a2aClient.respondToPermission(taskId, decision);
-  }
-
-  // ---------------------------------------------------------------------------
-  // Transparency text extraction (foreman-spec 5.2)
-  // ---------------------------------------------------------------------------
-
-  private _transparencyText(workerName: string, event: StreamEvent): string | null {
-    if (event.type === 'message') {
-      const text = extractMessageText(event);
-      if (text) return `[${workerName}] ${text}`;
-    } else if (event.type === 'status') {
-      const data = event.data as Record<string, unknown> | null | undefined;
-      const state = data?.['state'] as string | undefined;
-      if (data?.['final'] && state === 'completed') {
-        return `[${workerName}] done.`;
-      }
-      if (state && ['failed', 'canceled', 'rejected'].includes(state)) {
-        return `[${workerName}] failed: ${state}`;
-      }
-    }
-    return null;
   }
 
   // ---------------------------------------------------------------------------

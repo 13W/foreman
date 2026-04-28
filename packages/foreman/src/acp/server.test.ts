@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import type { PlanEntry, ToolCall, ToolCallUpdate } from '@agentclientprotocol/sdk';
 import { DefaultACPAgentServer } from './server.js';
 
 // Minimal mock of AgentSideConnection that exercises the handler wiring
@@ -52,6 +53,89 @@ describe('DefaultACPAgentServer sendUpdate', () => {
     expect(sessionUpdateFn).toHaveBeenCalledWith(
       expect.objectContaining({ sessionId: 'session-1' }),
     );
+  });
+});
+
+describe('DefaultACPAgentServer sendPlan', () => {
+  it('throws when not connected', async () => {
+    const server = new DefaultACPAgentServer();
+    await expect(server.sendPlan('session-1', [])).rejects.toThrow('not connected');
+  });
+
+  it('calls conn.sessionUpdate with sessionUpdate: "plan" and entries', async () => {
+    const server = new DefaultACPAgentServer();
+    const sessionUpdateFn = vi.fn().mockResolvedValue(undefined);
+    const conn = makeConnectionMock({ sessionUpdate: sessionUpdateFn });
+    (server as unknown as { _conn: typeof conn })._conn = conn;
+
+    const entries: PlanEntry[] = [
+      { content: 'Task A', priority: 'high', status: 'pending' },
+      { content: 'Task B', priority: 'medium', status: 'in_progress' },
+    ];
+
+    await server.sendPlan('session-1', entries);
+
+    expect(sessionUpdateFn).toHaveBeenCalledTimes(1);
+    expect(sessionUpdateFn).toHaveBeenCalledWith({
+      sessionId: 'session-1',
+      update: { sessionUpdate: 'plan', entries },
+    });
+  });
+});
+
+describe('DefaultACPAgentServer sendToolCall', () => {
+  it('throws when not connected', async () => {
+    const server = new DefaultACPAgentServer();
+    const toolCall: ToolCall = { toolCallId: 'tc-1', title: 'Run coder', status: 'in_progress', kind: 'execute' };
+    await expect(server.sendToolCall('session-1', toolCall)).rejects.toThrow('not connected');
+  });
+
+  it('calls conn.sessionUpdate with sessionUpdate: "tool_call" and toolCall fields', async () => {
+    const server = new DefaultACPAgentServer();
+    const sessionUpdateFn = vi.fn().mockResolvedValue(undefined);
+    const conn = makeConnectionMock({ sessionUpdate: sessionUpdateFn });
+    (server as unknown as { _conn: typeof conn })._conn = conn;
+
+    const toolCall: ToolCall = {
+      toolCallId: 'tc-1',
+      title: 'Run coder',
+      status: 'in_progress',
+      kind: 'execute',
+      rawInput: { subtaskId: 's1' },
+    };
+
+    await server.sendToolCall('session-2', toolCall);
+
+    expect(sessionUpdateFn).toHaveBeenCalledTimes(1);
+    expect(sessionUpdateFn).toHaveBeenCalledWith({
+      sessionId: 'session-2',
+      update: { sessionUpdate: 'tool_call', ...toolCall },
+    });
+  });
+});
+
+describe('DefaultACPAgentServer sendToolCallUpdate', () => {
+  it('throws when not connected', async () => {
+    const server = new DefaultACPAgentServer();
+    const update: ToolCallUpdate = { toolCallId: 'tc-1', status: 'completed' };
+    await expect(server.sendToolCallUpdate('session-1', update)).rejects.toThrow('not connected');
+  });
+
+  it('calls conn.sessionUpdate with sessionUpdate: "tool_call_update" and update fields', async () => {
+    const server = new DefaultACPAgentServer();
+    const sessionUpdateFn = vi.fn().mockResolvedValue(undefined);
+    const conn = makeConnectionMock({ sessionUpdate: sessionUpdateFn });
+    (server as unknown as { _conn: typeof conn })._conn = conn;
+
+    const update: ToolCallUpdate = { toolCallId: 'tc-2', status: 'failed' };
+
+    await server.sendToolCallUpdate('session-3', update);
+
+    expect(sessionUpdateFn).toHaveBeenCalledTimes(1);
+    expect(sessionUpdateFn).toHaveBeenCalledWith({
+      sessionId: 'session-3',
+      update: { sessionUpdate: 'tool_call_update', ...update },
+    });
   });
 });
 

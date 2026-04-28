@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { Readable, Writable } from 'node:stream';
 import { AgentSideConnection, ndJsonStream, PROTOCOL_VERSION } from '@agentclientprotocol/sdk';
-import type { Agent, ContentBlock, PermissionOption } from '@agentclientprotocol/sdk';
+import type { Agent, ContentBlock, PermissionOption, PlanEntry, ToolCall, ToolCallUpdate } from '@agentclientprotocol/sdk';
 import type {
   ACPAgentServer,
   ACPPermissionRequest,
@@ -64,6 +64,36 @@ export class DefaultACPAgentServer implements ACPAgentServer {
         conn.sessionUpdate({ sessionId, update: { sessionUpdate: 'agent_message_chunk', content: block } }),
       ),
     );
+  }
+
+  async sendPlan(sessionId: string, entries: PlanEntry[]): Promise<void> {
+    const conn = this._conn;
+    if (!conn) throw new Error('DefaultACPAgentServer: not connected — call listen() first');
+    this._msgLogger?.log('out', 'acp', 'plan', { entries }, { sessionId });
+    await conn.sessionUpdate({
+      sessionId,
+      update: { sessionUpdate: 'plan', entries },
+    });
+  }
+
+  async sendToolCall(sessionId: string, toolCall: ToolCall): Promise<void> {
+    const conn = this._conn;
+    if (!conn) throw new Error('DefaultACPAgentServer: not connected — call listen() first');
+    this._msgLogger?.log('out', 'acp', 'tool_call', toolCall, { sessionId });
+    await conn.sessionUpdate({
+      sessionId,
+      update: { sessionUpdate: 'tool_call', ...toolCall },
+    });
+  }
+
+  async sendToolCallUpdate(sessionId: string, update: ToolCallUpdate): Promise<void> {
+    const conn = this._conn;
+    if (!conn) throw new Error('DefaultACPAgentServer: not connected — call listen() first');
+    this._msgLogger?.log('out', 'acp', 'tool_call_update', update, { sessionId });
+    await conn.sessionUpdate({
+      sessionId,
+      update: { sessionUpdate: 'tool_call_update', ...update },
+    });
   }
 
   async requestPermission(
