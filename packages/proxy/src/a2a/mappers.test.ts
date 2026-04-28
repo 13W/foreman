@@ -89,10 +89,21 @@ describe('mapPromptEventToStreamEvent', () => {
     expect(event?.type).toBe('status');
   });
 
-  it('maps plan to status working with entry count', () => {
-    const event = mapPromptEventToStreamEvent({ kind: 'plan', entries: [1, 2, 3] });
+  it('maps plan event to status with entries carried in data part', () => {
+    const entries = [
+      { content: 'task 1', priority: 'medium', status: 'pending' },
+      { content: 'task 2', priority: 'low', status: 'pending' },
+    ];
+    const event = mapPromptEventToStreamEvent({ kind: 'plan', entries });
     expect(event?.type).toBe('status');
-    expect((event?.data as any).message).toContain('3');
+    const data = event?.data as any;
+    expect(data.state).toBe('working');
+    const parts = data.message?.parts as any[];
+    expect(parts).toHaveLength(1);
+    expect(parts[0].kind).toBe('data');
+    expect(parts[0].data.entries).toHaveLength(2);
+    expect(parts[0].data.entries[0].content).toBe('task 1');
+    expect(parts[0].data.entries[1].content).toBe('task 2');
   });
 
   it('returns null for stop', () => {

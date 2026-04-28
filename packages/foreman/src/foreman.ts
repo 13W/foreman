@@ -28,10 +28,20 @@ import type {
 } from '@foreman-stack/shared';
 import { mapPermissionOptionToDecision } from './permissions/mapper.js';
 import { PlanAbortedError, PlanExecutor, PlannerFallbackHandler } from './plan/index.js';
-import type { PlannerSession, PlannerSessionOptions } from './plan/index.js';
+import type { PlannerSession, PlannerSessionOptions, ExecutionStateSnapshot } from './plan/index.js';
 import { SessionManager } from './session/manager.js';
 import { SessionLimitError } from './session/errors.js';
 import type { SessionState } from './session/state.js';
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+const EMPTY_EXECUTION_STATE: ExecutionStateSnapshot = {
+  completed: new Map(),
+  inProgress: new Map(),
+  failed: new Map(),
+};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -124,6 +134,9 @@ export class Foreman {
 
   /** Active PlannerSessions by ACP sessionId — kept alive during plan execution for escalation. */
   private readonly _plannerSessions = new Map<string, PlannerSession>();
+
+  /** Per-session execution state snapshot, populated during _executePlan for ask() state injection. */
+  private readonly _executionStates = new Map<string, ExecutionStateSnapshot>();
 
   constructor(opts: ForemanOpts) {
     this.config = opts.config;
@@ -261,6 +274,7 @@ export class Foreman {
             llmClient: this.llmClient,
             config: this.config,
             logger: this.logger,
+            getExecutionState: () => this._executionStates.get(sessionId) ?? EMPTY_EXECUTION_STATE,
           });
           this._plannerSessions.set(sessionId, plannerSession);
           sessionState.planOwnerRef = { kind: 'self' };
@@ -287,6 +301,8 @@ export class Foreman {
             plannerUrl: choice.workerUrl,
             config: this.config,
             logger: this.logger,
+            workersAvailable: available.filter((w) => !this.catalog.isPlanner(w)).flatMap((w) => [toToolName(w), ...(w.agent_card?.name ? [w.agent_card.name] : [])]),
+            getExecutionState: () => this._executionStates.get(sessionId) ?? EMPTY_EXECUTION_STATE,
           });
           this._plannerSessions.set(sessionId, plannerSession);
           sessionState.planOwnerRef = { kind: 'external', taskId: '' };
@@ -356,6 +372,8 @@ export class Foreman {
               plannerUrl,
               config: this.config,
               logger: this.logger,
+              workersAvailable: available.filter((w) => !this.catalog.isPlanner(w)).flatMap((w) => [toToolName(w), ...(w.agent_card?.name ? [w.agent_card.name] : [])]),
+              getExecutionState: () => this._executionStates.get(sessionId) ?? EMPTY_EXECUTION_STATE,
             });
             this._plannerSessions.set(sessionId, plannerSession);
             sessionState.planOwnerRef = { kind: 'external', taskId: '' };
@@ -535,6 +553,17 @@ export class Foreman {
     const subtaskTextBuffers = new Map<string, string>();
     const subtaskStarted = new Set<string>();
 
+    // Initialize per-session execution state for plan-state injection in ask()
+    const executionState: ExecutionStateSnapshot = {
+      completed: new Map(),
+      inProgress: new Map(),
+      failed: new Map(),
+    };
+    this._executionStates.set(sessionId, executionState);
+
+    // Signal planner session that execution is starting (enables stream filtering)
+    this._plannerSessions.get(sessionId)?.markExecutionStarted?.();
+
     const executor = new PlanExecutor({
       dispatchManager: this.dispatchManager,
       catalog: this.catalog,
@@ -547,6 +576,11 @@ export class Foreman {
       onSubtaskEvent: (subtaskId, event) => {
         const workerName = subtaskWorkerNames.get(subtaskId) ?? subtaskId;
         const description = subtaskDescriptions.get(subtaskId) ?? subtaskId;
+
+        // Track execution state for plan-state injection in ask()
+        if (!executionState.inProgress.has(subtaskId)) {
+          executionState.inProgress.set(subtaskId, { workerName });
+        }
 
         // First event for this subtask → open tool_call card and transition plan entry
         if (!subtaskStarted.has(subtaskId)) {
@@ -601,7 +635,10 @@ export class Foreman {
       );
 
       // Terminal: mark all completed subtasks
-      for (const { subtaskId } of subtaskResults) {
+      for (const { subtaskId, result } of subtaskResults) {
+        executionState.inProgress.delete(subtaskId);
+        executionState.completed.set(subtaskId, { resultSummary: result.summary.slice(0, 100) });
+
         this.acpServer
           .sendToolCallUpdate(sessionId, { toolCallId: subtaskId, status: 'completed' })
           .catch((err: unknown) =>
@@ -627,6 +664,9 @@ export class Foreman {
           { sessionId, subtaskId: err.subtaskId, status: err.taskResult.status, detail },
           'plan execution aborted',
         );
+
+        executionState.inProgress.delete(err.subtaskId);
+        executionState.failed.set(err.subtaskId, { errorMessage: detail ?? err.taskResult.status });
 
         // Mark failed subtask
         this.acpServer
@@ -674,6 +714,7 @@ export class Foreman {
       await this.acpServer.sendUpdate(sessionId, [{ type: 'text', text: summary }]);
       return;
     } finally {
+      this._executionStates.delete(sessionId);
       const plannerSession = this._plannerSessions.get(sessionId);
       if (plannerSession) {
         await plannerSession.close().catch((err: unknown) =>

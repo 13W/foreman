@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { TaskPayload } from '@foreman-stack/shared';
 import type {
@@ -106,7 +107,16 @@ export function mapPromptEventToStreamEvent(event: PromptEvent): StreamEvent | n
       return {
         type: 'status',
         taskId: '',
-        data: { state: 'working', message: `plan updated (${event.entries.length} entries)` },
+        data: {
+          kind: 'message',
+          state: 'working',
+          message: {
+            kind: 'message',
+            messageId: randomUUID(),
+            parts: [{ kind: 'data', data: { entries: event.entries } }],
+            role: 'agent',
+          },
+        },
       };
     case 'stop':
     case 'permission_request':

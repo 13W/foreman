@@ -1,5 +1,6 @@
 import { Plan } from '@foreman-stack/shared';
 import type { A2AClient } from '@foreman-stack/shared';
+import type { PlanEntry } from '@agentclientprotocol/sdk';
 import type { Logger } from 'pino';
 import type { ForemanConfig } from '../config.js';
 import type { DispatchManager } from '../workers/dispatch-manager.js';
@@ -10,8 +11,13 @@ import { ToolRegistry } from '../llm/tool-registry.js';
 import { SELF_PLANNED_SYSTEM_PROMPT } from './planner-prompts.js';
 import { extractArtifactText, extractMessageText } from '../workers/stream-helpers.js';
 import type { StreamEvent, TaskPayload } from '@foreman-stack/shared';
+import { entriesToPlan } from './entries-to-plan.js';
+import { formatPlanStateForPlanner } from './state-formatter.js';
+import type { ExecutionStateSnapshot } from './state-formatter.js';
 
 export type PlannerSessionMode = 'external_planner' | 'self_planned' | 'single_task_dispatch';
+
+export type { ExecutionStateSnapshot };
 
 export interface PlannerSessionOptions {
   mode: PlannerSessionMode;
@@ -24,6 +30,9 @@ export interface PlannerSessionOptions {
   // common:
   config: ForemanConfig;
   logger: Logger;
+  // optional execution state for plan-state injection in ask()
+  workersAvailable?: string[];
+  getExecutionState?: () => ExecutionStateSnapshot;
 }
 
 export interface PlannerSession {
@@ -69,6 +78,12 @@ export interface PlannerSession {
    * Updates the plan if the planner responds with one, or sets a new pending question.
    */
   resumeWithAnswer(answer: string): Promise<void>;
+
+  /**
+   * Signal that plan execution has started.
+   * After this, the session is authoritative for status — planner plan events are filtered.
+   */
+  markExecutionStarted(): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -93,6 +108,26 @@ function extractTextFromStatusMessage(event: StreamEvent): string {
     }
   }
   return result;
+}
+
+/**
+ * Extract ACP plan entries from a status event produced by the proxy mapper.
+ * The mapper wraps entries in: data.message.parts[].{kind:'data', data:{entries:[...]}}.
+ */
+function extractPlanEntriesFromStatusEvent(event: StreamEvent): unknown[] | null {
+  const data = event.data as Record<string, unknown> | null | undefined;
+  const message = data?.['message'] as Record<string, unknown> | null | undefined;
+  const parts = (message?.['parts'] as unknown[]) ?? [];
+  for (const part of parts) {
+    const p = part as Record<string, unknown> | null | undefined;
+    if (p?.['kind'] === 'data') {
+      const d = p['data'] as Record<string, unknown> | null | undefined;
+      if (d && Array.isArray(d['entries'])) {
+        return d['entries'];
+      }
+    }
+  }
+  return null;
 }
 
 function tryParsePlanFromText(text: string): Plan | null {
@@ -158,13 +193,14 @@ function isTerminalStatus(event: StreamEvent): boolean {
  *             or terminal (planner answered).
  *   close() → best-effort cancel.
  *
- * NOTE: Requires the planner worker to stay in input-required state after
- * emitting the plan (not transition to completed). This is a planner-side
- * change that must be coordinated separately (t4.6 finding).
+ * Primary plan source: ACP plan events (TodoWrite → adapter → plan entries in status event).
+ * Fallback: JSON-in-text / JSON-in-status-data-part (legacy path retained).
  *
- * ask() response convention: planner returns plain text (or JSON) in message
- * events. We collect all text and return it. JSON is parsed opportunistically
- * by the caller if needed.
+ * During execution phase (after markExecutionStarted()):
+ *   - Foreman is authoritative for subtask statuses.
+ *   - Planner plan event status changes are silently ignored.
+ *   - Planner content/metadata changes on existing entries are accepted.
+ *   - New entries from planner during execution are logged and ignored (MVP).
  */
 export class ExternalPlannerSession implements PlannerSession {
   readonly mode: PlannerSessionMode = 'external_planner';
@@ -174,11 +210,16 @@ export class ExternalPlannerSession implements PlannerSession {
   private _plan: Plan | null = null;
   private _pendingQuestion: string | null = null;
   private _closed = false;
+  private _latestEntries: PlanEntry[] | null = null;
+  private _phase: 'planning' | 'executing' | 'closed' = 'planning';
+  private _originatorIntent = '';
 
   get taskId(): string | null { return this._taskId; }
 
   private readonly _logger: Logger;
   private readonly _timeoutMs: number;
+  private readonly _workersAvailable: string[];
+  private readonly _getExecutionState?: () => ExecutionStateSnapshot;
 
   constructor(
     private readonly _dispatchManager: DispatchManager,
@@ -186,12 +227,18 @@ export class ExternalPlannerSession implements PlannerSession {
     private readonly _plannerUrl: string,
     private readonly _config: ForemanConfig,
     logger: Logger,
+    workersAvailable: string[] = [],
+    getExecutionState?: () => ExecutionStateSnapshot,
   ) {
     this._logger = logger.child({ component: 'planner-session', mode: 'external_planner' });
     this._timeoutMs = _config.runtime.planner_response_timeout_sec * 1000;
+    this._workersAvailable = workersAvailable;
+    this._getExecutionState = getExecutionState;
   }
 
   async open(decompositionRequest: string): Promise<void> {
+    this._originatorIntent = decompositionRequest;
+
     const payload: TaskPayload = {
       description: decompositionRequest,
       expected_output: 'A structured Plan object in JSON format',
@@ -218,8 +265,18 @@ export class ExternalPlannerSession implements PlannerSession {
     if (this._closed) throw new Error('PlannerSession already closed');
     if (!this._handle || !this._taskId) throw new Error('PlannerSession not open');
 
+    let fullQuestion = question;
+    if (this._plan && this._getExecutionState) {
+      const state = this._getExecutionState();
+      const formatted = formatPlanStateForPlanner(this._plan, state);
+      fullQuestion =
+        `${formatted}\n\n---\n\n${question}\n\n` +
+        'Please answer the question. Do not modify the plan list — execution status is managed externally. ' +
+        'If the question requires user input, respond with the literal text "ASK_USER".';
+    }
+
     this._logger.debug({ taskId: this._taskId }, 'sending follow-up question to planner');
-    await this._a2aClient.sendFollowUp(this._taskId, [{ kind: 'text', text: question }]);
+    await this._a2aClient.sendFollowUp(this._taskId, [{ kind: 'text', text: fullQuestion }]);
 
     const { text } = await this._consumeUntilPlanOrPause();
     return text;
@@ -228,6 +285,7 @@ export class ExternalPlannerSession implements PlannerSession {
   async close(): Promise<void> {
     if (this._closed) return;
     this._closed = true;
+    this._phase = 'closed';
     if (this._handle) {
       await this._handle.cancel().catch((err: unknown) => {
         this._logger.debug({ err: String(err) }, 'planner cancel error (ignored)');
@@ -256,14 +314,27 @@ export class ExternalPlannerSession implements PlannerSession {
     if (plan) this._plan = plan;
   }
 
+  markExecutionStarted(): void {
+    if (this._phase === 'planning') {
+      this._phase = 'executing';
+      this._logger.debug({ taskId: this._taskId }, 'execution started; plan events from planner will be filtered');
+    }
+  }
+
   /**
-   * Consume events from the handle (using manual .next() to avoid breaking the
-   * generator on early exit) until:
+   * Consume events from the handle until:
    *  - input-required: planner is waiting for next input
    *  - terminal state: planner finished
    *  - done: stream ended
    *
-   * Returns any plan found and accumulated text from message/artifact events.
+   * Detects ACP plan entries from status events and updates _latestEntries.
+   * On exit, converts _latestEntries to Plan if available (primary path);
+   * falls back to JSON-in-text / JSON-in-status-data-part.
+   *
+   * During 'executing' phase, plan events are filtered:
+   *   - Status changes on existing entries: silently ignored (foreman authoritative)
+   *   - Additions: logged and ignored (TODO: surface as suggestion in future)
+   *   - Content/metadata changes on existing entries: accepted
    */
   private async _consumeUntilPlanOrPause(): Promise<{ plan: Plan | null; text: string }> {
     const handle = this._handle!;
@@ -288,14 +359,20 @@ export class ExternalPlannerSession implements PlannerSession {
       } else if (event.type === 'artifact') {
         text += extractArtifactText(event);
       } else if (event.type === 'status') {
+        // Check for plan entries from the proxy mapper (primary ACP plan path)
+        const rawEntries = extractPlanEntriesFromStatusEvent(event);
+        if (rawEntries !== null) {
+          this._handleIncomingEntries(rawEntries as PlanEntry[]);
+          // Don't break — keep consuming; plan can be refined multiple times
+        }
+
         const statusText = extractTextFromStatusMessage(event);
         if (statusText) text += statusText;
+
         if (isInputRequired(event)) {
-          // Try to extract a plan from the status event data (e.g. summary field).
           const fromStatus = tryParsePlanFromStatusEvent(event);
           if (fromStatus) plan = fromStatus;
           if (!plan && !tryParsePlanFromText(text)) {
-            // Planner is asking a question or paused without a plan.
             this._pendingQuestion = text.trim() || '(planner needs clarification)';
           }
           break;
@@ -311,12 +388,87 @@ export class ExternalPlannerSession implements PlannerSession {
       }
     }
 
+    // Primary path: convert _latestEntries to Plan if available
+    if (this._latestEntries !== null && this._latestEntries.length > 0) {
+      try {
+        plan = entriesToPlan(this._latestEntries, {
+          originatorIntent: this._originatorIntent,
+          availableWorkerNames: this._workersAvailable,
+          logger: this._logger,
+        });
+        this._pendingQuestion = null;
+        this._logger.info({ entryCount: this._latestEntries.length }, 'plan built from ACP plan entries (primary path)');
+      } catch (err) {
+        this._logger.warn({ err: String(err) }, 'entriesToPlan failed; falling back to text/status path');
+      }
+    }
+
+    // Fallback: parse from accumulated text
     if (!plan && text) {
       plan = tryParsePlanFromText(text);
-      if (plan) this._pendingQuestion = null;
+      if (plan) {
+        this._pendingQuestion = null;
+        this._logger.info('plan built from text JSON (fallback path)');
+      }
     }
 
     return { plan, text };
+  }
+
+  /**
+   * Handle incoming plan entries, applying phase-appropriate filtering.
+   */
+  private _handleIncomingEntries(incoming: PlanEntry[]): void {
+    if (this._phase === 'planning') {
+      this._latestEntries = incoming;
+      this._logger.debug({ count: incoming.length }, 'plan entries updated (planning phase)');
+      return;
+    }
+
+    if (this._phase !== 'executing' || this._latestEntries === null) {
+      return;
+    }
+
+    // Executing phase: foreman is authoritative for statuses
+    const existingById = new Map(
+      this._latestEntries.map((e) => {
+        const id = ((e._meta ?? {}) as Record<string, unknown>)['subtaskId'] as string | undefined ?? '';
+        return [id, e] as const;
+      }),
+    );
+
+    let hasNewEntries = false;
+    const updated = [...this._latestEntries];
+
+    for (const entry of incoming) {
+      const id = ((entry._meta ?? {}) as Record<string, unknown>)['subtaskId'] as string | undefined ?? '';
+      if (!id || !existingById.has(id)) {
+        this._logger.info(
+          { subtaskId: id },
+          // TODO: surface new entries as suggestions in future
+          'planner added new entry during execution; ignoring (foreman authoritative)',
+        );
+        hasNewEntries = true;
+        continue;
+      }
+      const existingEntry = existingById.get(id)!;
+      const existingIdx = updated.findIndex(
+        (e) => ((e._meta ?? {}) as Record<string, unknown>)['subtaskId'] === id,
+      );
+      if (existingIdx >= 0) {
+        // Accept content/metadata changes, preserve status
+        updated[existingIdx] = { ...entry, status: existingEntry.status };
+      }
+    }
+
+    if (!hasNewEntries) {
+      this._latestEntries = updated;
+      this._logger.debug('plan entries refined during execution (statuses preserved)');
+    } else {
+      // Only update existing entries, don't add new ones
+      this._latestEntries = updated;
+      this._logger.debug('plan entries partially refined during execution (new entries ignored)');
+    }
   }
 }
 
@@ -335,6 +487,7 @@ export class SelfPlannedSession implements PlannerSession {
   private _history: Message[] = [];
   private _plan: Plan | null = null;
   private _pendingQuestion: string | null = null;
+  private readonly _getExecutionState?: () => ExecutionStateSnapshot;
 
   private readonly _logger: Logger;
   private readonly _timeoutMs: number;
@@ -343,9 +496,11 @@ export class SelfPlannedSession implements PlannerSession {
     private readonly _llmClient: LLMClient,
     private readonly _config: ForemanConfig,
     logger: Logger,
+    getExecutionState?: () => ExecutionStateSnapshot,
   ) {
     this._logger = logger.child({ component: 'planner-session', mode: 'self_planned' });
     this._timeoutMs = _config.runtime.planner_response_timeout_sec * 1000;
+    this._getExecutionState = getExecutionState;
   }
 
   async open(decompositionRequest: string): Promise<void> {
@@ -362,7 +517,17 @@ export class SelfPlannedSession implements PlannerSession {
   }
 
   async ask(question: string): Promise<string> {
-    const qMsg: Message = { role: 'user', content: [{ type: 'text', text: question }] };
+    let fullQuestion = question;
+    if (this._plan && this._getExecutionState) {
+      const state = this._getExecutionState();
+      const formatted = formatPlanStateForPlanner(this._plan, state);
+      fullQuestion =
+        `${formatted}\n\n---\n\n${question}\n\n` +
+        'Please answer the question. Do not modify the plan list — execution status is managed externally. ' +
+        'If the question requires user input, respond with the literal text "ASK_USER".';
+    }
+
+    const qMsg: Message = { role: 'user', content: [{ type: 'text', text: fullQuestion }] };
     const messages = [...this._history, qMsg];
 
     this._logger.debug('asking self-planned session');
@@ -385,6 +550,10 @@ export class SelfPlannedSession implements PlannerSession {
 
   async resumeWithAnswer(_answer: string): Promise<void> {
     // Self-planned sessions don't pause for user questions.
+  }
+
+  markExecutionStarted(): void {
+    // no-op for self-planned; no stream to filter
   }
 
   private async _runOneTurn(messages: Message[]): Promise<string> {
@@ -438,6 +607,10 @@ export class SingleTaskDispatchSession implements PlannerSession {
   async resumeWithAnswer(_answer: string): Promise<void> {
     // no-op
   }
+
+  markExecutionStarted(): void {
+    // no-op
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -458,11 +631,13 @@ export function createPlannerSession(options: PlannerSessionOptions): PlannerSes
         options.plannerUrl,
         config,
         logger,
+        options.workersAvailable,
+        options.getExecutionState,
       );
     }
     case 'self_planned': {
       if (!options.llmClient) throw new Error('self_planned mode requires llmClient');
-      return new SelfPlannedSession(options.llmClient, config, logger);
+      return new SelfPlannedSession(options.llmClient, config, logger, options.getExecutionState);
     }
     case 'single_task_dispatch':
       return new SingleTaskDispatchSession();

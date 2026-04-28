@@ -12,7 +12,7 @@ export {
   SingleTaskDispatchSession,
   createPlannerSession,
 } from './planner-session.js';
-export type { PlannerSession, PlannerSessionMode, PlannerSessionOptions } from './planner-session.js';
+export type { PlannerSession, PlannerSessionMode, PlannerSessionOptions, ExecutionStateSnapshot } from './planner-session.js';
 
 export { SELF_PLANNED_SYSTEM_PROMPT } from './planner-prompts.js';
 

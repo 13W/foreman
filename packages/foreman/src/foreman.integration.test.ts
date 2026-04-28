@@ -581,6 +581,9 @@ describe('Foreman integration — no-planner fallback: self_plan', () => {
       ask: vi.fn(),
       close: vi.fn().mockResolvedValue(undefined),
       getPlan: vi.fn().mockReturnValue(selfPlan),
+      getPendingQuestion: vi.fn().mockReturnValue(null),
+      resumeWithAnswer: vi.fn().mockResolvedValue(undefined),
+      markExecutionStarted: vi.fn(),
     };
 
     const fallbackHandler = makeMockFallbackHandler({ kind: 'self_plan' });
