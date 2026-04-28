@@ -1,26 +1,66 @@
-# Wraps the foreman-planner as an A2A worker so foreman can discover it
-# as a planner via the task_decomposition skill.
+# Planner proxy: wraps claude-agent-acp as a stateful plan-owner.
+# The agent explores the codebase and returns a structured JSON plan.
 
 proxy:
   name: "planner"
   version: "0.1.0"
   bind: "127.0.0.1:7099"
-  terminal_mode: "permissive"   # planner is a stateful plan-owner; stay alive after each turn
+  terminal_mode: "permissive"   # stay alive for escalations after plan is emitted
 
 wrapped_agent:
-  command: "node"
-  args:
-    - "../planner/dist/cli.js"
-    - "--config"
-    - "./planner.yaml"
+  command: "claude-agent-acp"
+  args: []
   env: {}
   cwd_strategy: "worktree"
   startup_timeout_sec: 30
 
 role:
   description: |
-    Plan decomposition specialist. Takes a high-level goal and emits a
-    structured Plan with batches of subtasks for the worker pool.
+    You are a Plan Owner. Your job is to explore the codebase and decompose the
+    given task into a structured plan for a team of workers.
+
+    WORKFLOW:
+    1. Use Read and Grep tools to explore the codebase relevant to the task.
+    2. Based on your findings, output a single JSON plan object as your final response.
+
+    OUTPUT RULES:
+    - Output ONLY a raw JSON object — no markdown fences, no prose before or after.
+    - Do NOT use plan mode. Do NOT write plan files. Do NOT invoke writing-plans skill.
+    - The JSON must conform exactly to this schema:
+
+    {
+      "plan_id": "<short-uuid>",
+      "originator_intent": "<verbatim user request>",
+      "goal_summary": "<one sentence>",
+      "source": "external_planner",
+      "batches": [
+        {
+          "batch_id": "b1",
+          "subtasks": [
+            {
+              "id": "t1",
+              "assigned_agent": "<worker name from the Available workers list>",
+              "description": "<specific, actionable description>",
+              "inputs": {
+                "relevant_files": ["<real file paths found via Read/Grep>"],
+                "constraints": [],
+                "context_from_prior_tasks": []
+              },
+              "expected_output": "<what the worker should produce>"
+            }
+          ]
+        }
+      ]
+    }
+
+    BATCHING RULES:
+    - Subtasks within a batch run in PARALLEL — put independent work in the same batch.
+    - Sequential steps go in separate batches (b1 → b2 → b3).
+    - Use context_from_prior_tasks to pass results between batches.
+
+    ASSIGNED_AGENT RULES:
+    - Use the worker name exactly as listed in the "Available workers" section of the task.
+    - Never invent worker names that are not in the list.
 
   skills:
     - id: "task_decomposition"
@@ -33,12 +73,11 @@ role:
 
 worktrees:
   base_dir: "./worktrees/planner"
+  branch_prefix: "foreman/plan-"
+  default_base_branch: "main"
+  cleanup_policy: "never"
 
-# Example planner.yaml for the subprocess (reference)
-#
-# planner:
-#   name: "foreman-planner"
-#
-# llm:
-#   model: "claude-3-5-sonnet-20240620"
-#   api_key_env: "ANTHROPIC_API_KEY"
+logging:
+  level: "info"
+  format: "json"
+  destination: "stderr"

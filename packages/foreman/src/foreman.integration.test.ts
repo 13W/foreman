@@ -578,7 +578,7 @@ describe('Foreman integration — no-planner fallback: self_plan', () => {
 
     await priv(foreman)._handlePrompt(SESSION_ID, [{ type: 'text', text: 'do something' }]);
 
-    expect(mockPlannerSession.open).toHaveBeenCalledWith('do something');
+    expect(mockPlannerSession.open).toHaveBeenCalledWith(expect.stringContaining('do something'));
     expect(sendUpdates[sendUpdates.length - 1]).toBe('Self-plan done.');
   });
 });

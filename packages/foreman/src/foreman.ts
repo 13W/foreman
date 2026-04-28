@@ -60,6 +60,15 @@ function buildWorkerList(workers: WorkerCatalogEntry[]): string {
   return workers.map((w) => `- ${toToolName(w)}: ${buildWorkerDescription(w)}`).join('\n');
 }
 
+function buildDecompositionRequest(userText: string, workers: WorkerCatalogEntry[]): string {
+  const nonPlanners = workers.filter((w) => {
+    const skills = w.agent_card?.skills ?? [];
+    return !skills.some((s) => s.id === 'task_decomposition');
+  });
+  const workerList = buildWorkerList(nonPlanners);
+  return `${userText}\n\n--- Available workers ---\n${workerList}`;
+}
+
 /**
  * Parse a PermissionDecision from planner answer text.
  * Returns null if the text is unparseable, empty, or contains "ask_user"/"ask user".
@@ -256,7 +265,7 @@ export class Foreman {
           });
           this._plannerSessions.set(sessionId, plannerSession);
           sessionState.planOwnerRef = { kind: 'self' };
-          await plannerSession.open(userText);
+          await plannerSession.open(buildDecompositionRequest(userText, available));
           const selfPlan = plannerSession.getPlan();
           if (!selfPlan) {
             await this.acpServer.sendUpdate(sessionId, [
@@ -282,7 +291,7 @@ export class Foreman {
           });
           this._plannerSessions.set(sessionId, plannerSession);
           sessionState.planOwnerRef = { kind: 'external', taskId: '' };
-          await plannerSession.open(userText);
+          await plannerSession.open(buildDecompositionRequest(userText, available));
           const delegatePlan = plannerSession.getPlan();
           sessionState.planOwnerRef = { kind: 'external', taskId: plannerSession.taskId ?? '' };
           if (!delegatePlan) {
@@ -357,7 +366,7 @@ export class Foreman {
             ]);
             this.logger.debug({ plannerUrl, sessionId }, 'opening planner session');
 
-            await plannerSession.open(userText);
+            await plannerSession.open(buildDecompositionRequest(userText, available));
 
             const plan = plannerSession.getPlan();
             const pendingQuestion = plannerSession.getPendingQuestion();
