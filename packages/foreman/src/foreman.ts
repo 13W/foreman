@@ -416,7 +416,9 @@ export class Foreman {
     const messages = [...sessionState.conversationHistory, userMsg];
 
     sessionState.abortController = new AbortController();
-    const loop = new LLMLoop(this.llmClient, registry);
+    const loop = new LLMLoop(this.llmClient, registry, {
+      toolTimeoutMs: this.config.runtime.default_task_timeout_sec * 1000,
+    });
 
     try {
       // Drive the generator manually to capture the return value (updated history).
