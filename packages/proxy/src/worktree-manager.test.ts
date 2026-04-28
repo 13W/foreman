@@ -87,7 +87,7 @@ describe('WorktreeManager.createForTask', () => {
     execFileOk();
     const manager = new WorktreeManager(makeConfig());
 
-    const result = await manager.createForTask('task-abc', 'main');
+    const result = await manager.createForTask('task-abc', 'main', '/repo');
 
     expect(result.worktreePath).toBe('/tmp/test-worktrees/task-abc');
     expect(result.branchName).toBe('foreman/task-task-abc');
@@ -97,25 +97,54 @@ describe('WorktreeManager.createForTask', () => {
     execFileOk();
     const manager = new WorktreeManager(makeConfig({ branch_prefix: 'custom/prefix-' }));
 
-    const result = await manager.createForTask('my-task', 'main');
+    const result = await manager.createForTask('my-task', 'main', '/repo');
 
     expect(result.branchName).toBe('custom/prefix-my-task');
   });
 
-  it('uses base_dir from config for worktreePath', async () => {
+  it('uses absolute base_dir from config for worktreePath', async () => {
     execFileOk();
     const manager = new WorktreeManager(makeConfig({ base_dir: '/my/custom/dir' }));
 
-    const result = await manager.createForTask('task-1', 'main');
+    const result = await manager.createForTask('task-1', 'main', '/repo');
 
     expect(result.worktreePath).toBe('/my/custom/dir/task-1');
+  });
+
+  it('resolves relative base_dir against the passed cwd', async () => {
+    execFileOk();
+    const manager = new WorktreeManager(makeConfig({ base_dir: '.foreman-worktrees' }));
+
+    const result = await manager.createForTask('task-1', 'main', '/home/user/myproject');
+
+    expect(result.worktreePath).toBe('/home/user/myproject/.foreman-worktrees/task-1');
+  });
+
+  it('passes cwd to git rev-parse', async () => {
+    execFileOk();
+    const manager = new WorktreeManager(makeConfig());
+
+    await manager.createForTask('task-xyz', 'feature-branch', '/home/user/myproject');
+
+    const firstCall = mockExecFile.mock.calls[0];
+    expect(firstCall[2]).toMatchObject({ cwd: '/home/user/myproject' });
+  });
+
+  it('passes cwd to git worktree add', async () => {
+    execFileOk();
+    const manager = new WorktreeManager(makeConfig());
+
+    await manager.createForTask('task-abc', 'main', '/home/user/myproject');
+
+    const worktreeCall = mockExecFile.mock.calls[1];
+    expect(worktreeCall[2]).toMatchObject({ cwd: '/home/user/myproject' });
   });
 
   it('calls git rev-parse --verify to validate base branch', async () => {
     execFileOk();
     const manager = new WorktreeManager(makeConfig());
 
-    await manager.createForTask('task-xyz', 'feature-branch');
+    await manager.createForTask('task-xyz', 'feature-branch', '/repo');
 
     const firstCall = mockExecFile.mock.calls[0];
     expect(firstCall[0]).toBe('git');
@@ -128,7 +157,7 @@ describe('WorktreeManager.createForTask', () => {
     execFileOk();
     const manager = new WorktreeManager(makeConfig());
 
-    await manager.createForTask('task-abc', 'main');
+    await manager.createForTask('task-abc', 'main', '/repo');
 
     const worktreeCall = mockExecFile.mock.calls[1];
     expect(worktreeCall[0]).toBe('git');
@@ -142,7 +171,7 @@ describe('WorktreeManager.createForTask', () => {
     execFileFail('fatal: not a valid object');
     const manager = new WorktreeManager(makeConfig());
 
-    await expect(manager.createForTask('task-1', 'nonexistent-branch')).rejects.toThrow(
+    await expect(manager.createForTask('task-1', 'nonexistent-branch', '/repo')).rejects.toThrow(
       BaseBranchNotFoundError,
     );
   });
@@ -151,7 +180,7 @@ describe('WorktreeManager.createForTask', () => {
     execFileFail('fatal: not valid');
     const manager = new WorktreeManager(makeConfig());
 
-    await expect(manager.createForTask('task-1', 'no-such-branch')).rejects.toThrow(
+    await expect(manager.createForTask('task-1', 'no-such-branch', '/repo')).rejects.toThrow(
       /no-such-branch/,
     );
   });
@@ -160,14 +189,14 @@ describe('WorktreeManager.createForTask', () => {
     execFileOkThenFail(1, 'fatal: worktree already exists');
     const manager = new WorktreeManager(makeConfig());
 
-    await expect(manager.createForTask('task-1', 'main')).rejects.toThrow(WorktreeCreationError);
+    await expect(manager.createForTask('task-1', 'main', '/repo')).rejects.toThrow(WorktreeCreationError);
   });
 
   it('uses execFile (not exec) — no shell injection possible', async () => {
     execFileOk();
     const manager = new WorktreeManager(makeConfig());
 
-    await manager.createForTask('task-1', 'main');
+    await manager.createForTask('task-1', 'main', '/repo');
 
     // execFile is called with separate args array, not a shell string
     for (const call of mockExecFile.mock.calls) {
@@ -189,6 +218,10 @@ describe('WorktreeManager.cleanup', () => {
   it('removes worktree on success when policy is "on_success"', async () => {
     execFileOk();
     const manager = new WorktreeManager(makeConfig({ cleanup_policy: 'on_success' }));
+    // First create the worktree so cleanup has the cwd registered
+    await manager.createForTask('task-abc', 'main', '/repo');
+    mockExecFile.mockReset();
+    execFileOk();
 
     await manager.cleanup('task-abc', 'completed');
 
@@ -198,6 +231,19 @@ describe('WorktreeManager.cleanup', () => {
     expect(call[1]).toContain('worktree');
     expect(call[1]).toContain('remove');
     expect(call[1]).toContain('/tmp/test-worktrees/task-abc');
+  });
+
+  it('uses the cwd from createForTask for cleanup git command', async () => {
+    execFileOk();
+    const manager = new WorktreeManager(makeConfig({ cleanup_policy: 'always' }));
+    await manager.createForTask('task-abc', 'main', '/home/user/myproject');
+    mockExecFile.mockReset();
+    execFileOk();
+
+    await manager.cleanup('task-abc', 'completed');
+
+    const call = mockExecFile.mock.calls[0];
+    expect(call[2]).toMatchObject({ cwd: '/home/user/myproject' });
   });
 
   it('does not remove worktree on failure when policy is "on_success"', async () => {
@@ -212,6 +258,9 @@ describe('WorktreeManager.cleanup', () => {
   it('removes worktree for any status when policy is "always"', async () => {
     execFileOk();
     const manager = new WorktreeManager(makeConfig({ cleanup_policy: 'always' }));
+    await manager.createForTask('task-1', 'main', '/repo');
+    mockExecFile.mockReset();
+    execFileOk();
 
     await manager.cleanup('task-1', 'failed');
 
@@ -219,8 +268,11 @@ describe('WorktreeManager.cleanup', () => {
   });
 
   it('removes worktree even when git worktree remove fails (best-effort)', async () => {
-    execFileFail('error: not a worktree');
+    execFileOk();
     const manager = new WorktreeManager(makeConfig({ cleanup_policy: 'always' }));
+    await manager.createForTask('task-1', 'main', '/repo');
+    mockExecFile.mockReset();
+    execFileFail('error: not a worktree');
 
     // Should not throw
     await expect(manager.cleanup('task-1', 'completed')).resolves.toBeUndefined();

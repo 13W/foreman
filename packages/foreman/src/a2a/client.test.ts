@@ -55,6 +55,7 @@ const basePayload: TaskPayload = {
   timeout_sec: null,
   injected_mcps: [],
   inputs: { relevant_files: [], constraints: [], context_from_prior_tasks: [] },
+  cwd: null,
 };
 
 const agentUrl = 'http://agent.local:4000';

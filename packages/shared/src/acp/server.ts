@@ -2,7 +2,7 @@ import type { ContentBlock, PermissionOption, PlanEntry, ToolCall, ToolCallUpdat
 import type { ACPPermissionRequest, ACPTransport } from './types.js';
 
 export type InitializeHandler = () => void | Promise<void>;
-export type SessionNewHandler = (sessionId: string) => void | Promise<void>;
+export type SessionNewHandler = (sessionId: string, cwd: string | null) => void | Promise<void>;
 export type PromptHandler = (sessionId: string, content: ContentBlock[]) => Promise<void>;
 export type CancelHandler = (sessionId: string) => void | Promise<void>;
 

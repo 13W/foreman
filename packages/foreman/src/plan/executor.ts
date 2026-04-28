@@ -113,6 +113,7 @@ export class PlanExecutor {
           base_branch: null,
           timeout_sec: this._config.runtime.default_task_timeout_sec,
           injected_mcps: [],
+          cwd: this._sessionState.cwd,
         };
         const handle = await this._dispatchManager.dispatch(worker.url, payload);
         this._logger.info(

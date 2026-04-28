@@ -68,7 +68,7 @@ describe('WorktreeManager — integration with real git repo', () => {
     const config = makeConfig(repoDir, worktreeBaseDir);
     const manager = new WorktreeManager(config, repoDir);
 
-    const result = await manager.createForTask('task-001', 'main');
+    const result = await manager.createForTask('task-001', 'main', repoDir);
 
     expect(result.worktreePath).toBe(join(worktreeBaseDir, 'task-001'));
     expect(result.branchName).toBe('foreman/task-task-001');
@@ -83,7 +83,7 @@ describe('WorktreeManager — integration with real git repo', () => {
     const config = makeConfig(repoDir, worktreeBaseDir);
     const manager = new WorktreeManager(config, repoDir);
 
-    await manager.createForTask('task-002', 'main');
+    await manager.createForTask('task-002', 'main', repoDir);
 
     const { stdout } = await execFileAsync('git', ['branch', '--list', 'foreman/task-task-002'], {
       cwd: repoDir,
@@ -95,7 +95,7 @@ describe('WorktreeManager — integration with real git repo', () => {
     const config = makeConfig(repoDir, worktreeBaseDir);
     const manager = new WorktreeManager(config, repoDir);
 
-    await expect(manager.createForTask('task-003', 'no-such-branch')).rejects.toThrow(
+    await expect(manager.createForTask('task-003', 'no-such-branch', repoDir)).rejects.toThrow(
       BaseBranchNotFoundError,
     );
   });
@@ -105,7 +105,7 @@ describe('WorktreeManager — integration with real git repo', () => {
     config.worktrees.cleanup_policy = 'always';
     const manager = new WorktreeManager(config, repoDir);
 
-    const result = await manager.createForTask('task-004', 'main');
+    const result = await manager.createForTask('task-004', 'main', repoDir);
     await manager.cleanup('task-004', 'completed');
 
     const { stat } = await import('node:fs/promises');
@@ -117,7 +117,7 @@ describe('WorktreeManager — integration with real git repo', () => {
     config.worktrees.cleanup_policy = 'never';
     const manager = new WorktreeManager(config, repoDir);
 
-    const result = await manager.createForTask('task-005', 'main');
+    const result = await manager.createForTask('task-005', 'main', repoDir);
     await manager.cleanup('task-005', 'completed');
 
     const { stat } = await import('node:fs/promises');
@@ -130,7 +130,7 @@ describe('WorktreeManager — integration with real git repo', () => {
     config.worktrees.cleanup_policy = 'on_success';
     const manager = new WorktreeManager(config, repoDir);
 
-    const result = await manager.createForTask('task-006', 'main');
+    const result = await manager.createForTask('task-006', 'main', repoDir);
     await manager.cleanup('task-006', 'failed');
 
     const { stat } = await import('node:fs/promises');

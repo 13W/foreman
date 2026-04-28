@@ -31,6 +31,7 @@ export const TaskPayload = z
     base_branch: z.string().nullable().default(null),
     timeout_sec: z.number().int().positive().nullable().default(null),
     injected_mcps: z.array(McpServerSpec).default([]),
+    cwd: z.string().nullable().default(null),
   })
   .strict();
 

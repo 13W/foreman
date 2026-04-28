@@ -37,6 +37,7 @@ const basePayload: TaskPayload = {
   base_branch: null,
   timeout_sec: null,
   injected_mcps: [],
+  cwd: null,
 };
 
 function makeStatusEvent(

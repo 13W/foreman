@@ -154,9 +154,10 @@ export class DefaultACPAgentServer implements ACPAgentServer {
             };
           },
 
-          async newSession(_params) {
+          async newSession(params) {
             const sessionId = randomUUID();
-            await self._sessionNewHandler?.(sessionId);
+            const cwd = params.cwd ?? null;
+            await self._sessionNewHandler?.(sessionId, cwd);
             return { sessionId };
           },
 

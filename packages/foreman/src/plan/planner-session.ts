@@ -33,6 +33,7 @@ export interface PlannerSessionOptions {
   // optional execution state for plan-state injection in ask()
   workersAvailable?: string[];
   getExecutionState?: () => ExecutionStateSnapshot;
+  cwd?: string | null;
 }
 
 export interface PlannerSession {
@@ -220,6 +221,7 @@ export class ExternalPlannerSession implements PlannerSession {
   private readonly _timeoutMs: number;
   private readonly _workersAvailable: string[];
   private readonly _getExecutionState?: () => ExecutionStateSnapshot;
+  private readonly _cwd: string | null;
 
   constructor(
     private readonly _dispatchManager: DispatchManager,
@@ -229,11 +231,13 @@ export class ExternalPlannerSession implements PlannerSession {
     logger: Logger,
     workersAvailable: string[] = [],
     getExecutionState?: () => ExecutionStateSnapshot,
+    cwd: string | null = null,
   ) {
     this._logger = logger.child({ component: 'planner-session', mode: 'external_planner' });
     this._timeoutMs = _config.runtime.planner_response_timeout_sec * 1000;
     this._workersAvailable = workersAvailable;
     this._getExecutionState = getExecutionState;
+    this._cwd = cwd;
   }
 
   async open(decompositionRequest: string): Promise<void> {
@@ -249,6 +253,7 @@ export class ExternalPlannerSession implements PlannerSession {
       timeout_sec: this._config.runtime.default_task_timeout_sec,
       injected_mcps: [],
       inputs: { relevant_files: [], constraints: [], context_from_prior_tasks: [] },
+      cwd: this._cwd,
     };
 
     this._logger.debug({ plannerUrl: this._plannerUrl }, 'dispatching decomposition request');
@@ -633,6 +638,7 @@ export function createPlannerSession(options: PlannerSessionOptions): PlannerSes
         logger,
         options.workersAvailable,
         options.getExecutionState,
+        options.cwd ?? null,
       );
     }
     case 'self_planned': {

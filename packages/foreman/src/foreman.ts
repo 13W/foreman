@@ -173,9 +173,9 @@ export class Foreman {
       logger.info('ACP initialize received');
     });
 
-    acpServer.onSessionNew((sessionId) => {
-      logger.info({ sessionId }, 'ACP session/new received');
-      this._handleSessionNew(sessionId);
+    acpServer.onSessionNew((sessionId, cwd) => {
+      logger.info({ sessionId, cwd }, 'ACP session/new received');
+      this._handleSessionNew(sessionId, cwd);
     });
 
     acpServer.onPrompt(async (sessionId, content) => {
@@ -218,9 +218,10 @@ export class Foreman {
   // Session lifecycle
   // ---------------------------------------------------------------------------
 
-  private _handleSessionNew(sessionId: string): void {
+  private _handleSessionNew(sessionId: string, cwd: string | null): void {
+    const effectiveCwd = cwd ?? process.cwd();
     try {
-      this.sessionManager.create(sessionId, process.cwd());
+      this.sessionManager.create(sessionId, effectiveCwd);
     } catch (err) {
       if (err instanceof SessionLimitError) {
         this.logger.warn({ sessionId, limit: err.limit }, 'session limit reached; session not created');
@@ -303,6 +304,7 @@ export class Foreman {
             logger: this.logger,
             workersAvailable: available.filter((w) => !this.catalog.isPlanner(w)).flatMap((w) => [toToolName(w), ...(w.agent_card?.name ? [w.agent_card.name] : [])]),
             getExecutionState: () => this._executionStates.get(sessionId) ?? EMPTY_EXECUTION_STATE,
+            cwd: sessionState.cwd,
           });
           this._plannerSessions.set(sessionId, plannerSession);
           sessionState.planOwnerRef = { kind: 'external', taskId: '' };
@@ -374,6 +376,7 @@ export class Foreman {
               logger: this.logger,
               workersAvailable: available.filter((w) => !this.catalog.isPlanner(w)).flatMap((w) => [toToolName(w), ...(w.agent_card?.name ? [w.agent_card.name] : [])]),
               getExecutionState: () => this._executionStates.get(sessionId) ?? EMPTY_EXECUTION_STATE,
+              cwd: sessionState.cwd,
             });
             this._plannerSessions.set(sessionId, plannerSession);
             sessionState.planOwnerRef = { kind: 'external', taskId: '' };
@@ -445,6 +448,7 @@ export class Foreman {
               base_branch: null,
               timeout_sec: this.config.runtime.default_task_timeout_sec,
               injected_mcps: [],
+              cwd: sessionState.cwd,
             };
             const taskResult = await this._runWorkerTask(
               worker.url,

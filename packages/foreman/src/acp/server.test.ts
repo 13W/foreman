@@ -21,7 +21,7 @@ describe('DefaultACPAgentServer handler registration', () => {
     const server = new DefaultACPAgentServer();
     expect(() => {
       server.onInitialize(() => { });
-      server.onSessionNew((_id) => { });
+      server.onSessionNew((_id, _cwd) => { });
       server.onPrompt(async (_id, _content) => { });
       server.onCancel((_id) => { });
     }).not.toThrow();

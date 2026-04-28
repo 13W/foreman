@@ -143,3 +143,46 @@ describe('Foreman._runWorkerTask', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// _handleSessionNew tests
+// ---------------------------------------------------------------------------
+
+describe('Foreman._handleSessionNew', () => {
+  let foreman: Foreman;
+  let sessionManager: SessionManager;
+
+  beforeEach(() => {
+    sessionManager = new SessionManager({
+      maxConcurrentSessions: minimalConfig.runtime.max_concurrent_sessions,
+    });
+    foreman = new Foreman({
+      config: minimalConfig as never,
+      sessionManager,
+      plannerSessionFactory: vi.fn(),
+    });
+  });
+
+  it('creates session with the provided cwd', () => {
+    const createSpy = vi.spyOn(sessionManager, 'create');
+
+    priv(foreman)._handleSessionNew('session-1', '/home/user/myproject');
+
+    expect(createSpy).toHaveBeenCalledWith('session-1', '/home/user/myproject');
+  });
+
+  it('falls back to process.cwd() when cwd is null', () => {
+    const createSpy = vi.spyOn(sessionManager, 'create');
+
+    priv(foreman)._handleSessionNew('session-2', null);
+
+    expect(createSpy).toHaveBeenCalledWith('session-2', process.cwd());
+  });
+
+  it('stores the cwd on the resulting SessionState', () => {
+    priv(foreman)._handleSessionNew('session-3', '/path/to/project');
+
+    const state = sessionManager.get('session-3');
+    expect(state?.cwd).toBe('/path/to/project');
+  });
+});
+

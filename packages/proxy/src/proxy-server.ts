@@ -84,9 +84,11 @@ export class ProxyServer {
     }
 
     // 2. Create worktree
+    const taskCwd = payload.cwd ?? process.cwd();
+    log.info({ cwd: taskCwd }, 'task cwd resolved');
     let worktreeResult: WorktreeResult;
     try {
-      worktreeResult = await this.worktreeManager.createForTask(taskId, baseBranch);
+      worktreeResult = await this.worktreeManager.createForTask(taskId, baseBranch, taskCwd);
     } catch (err) {
       log.error({ err }, 'Failed to create worktree');
       await this.a2aServer.completeTask(taskId, buildErrorTaskResult(err));
