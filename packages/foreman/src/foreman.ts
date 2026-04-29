@@ -570,13 +570,41 @@ export class Foreman {
 
     let results: string[];
     try {
+      this.logger.info(
+        {
+          sessionId,
+          planId: plan.plan_id,
+          batchCount: plan.batches.length,
+          subtaskCount: plan.batches.reduce((acc, b) => acc + b.subtasks.length, 0),
+        },
+        '_executePlan: about to invoke PlanExecutor.execute',
+      );
       const { subtaskResults } = await executor.execute(plan, userText);
+      this.logger.info(
+        {
+          sessionId,
+          planId: plan.plan_id,
+          subtaskResultsLength: subtaskResults.length,
+          subtaskIds: subtaskResults.map((r) => r.subtaskId),
+          subtaskStatuses: subtaskResults.map((r) => r.result.status),
+        },
+        '_executePlan: PlanExecutor.execute resolved',
+      );
       results = subtaskResults.map(
         ({ subtaskId, result }) => `[${subtaskId}] ${JSON.stringify(result)}`,
       );
 
       // Terminal: mark all completed subtasks
       for (const { subtaskId, result } of subtaskResults) {
+        this.logger.info(
+          {
+            sessionId,
+            subtaskId,
+            resultStatus: result.status,
+            iterationIndex: subtaskResults.findIndex((r) => r.subtaskId === subtaskId),
+          },
+          '_executePlan: completion loop iteration',
+        );
         executionState.inProgress.delete(subtaskId);
         executionState.completed.set(subtaskId, { resultSummary: result.summary.slice(0, 100) });
 
@@ -590,12 +618,34 @@ export class Foreman {
           planEntries[idx] = { ...planEntries[idx], status: 'completed' };
         }
       }
+      this.logger.info(
+        {
+          sessionId,
+          planEntriesCount: planEntries.length,
+          planEntriesStatuses: planEntries.map((e) => e.status),
+        },
+        '_executePlan: about to emit final sendPlan',
+      );
       this.acpServer
         .sendPlan(sessionId, [...planEntries])
         .catch((err: unknown) =>
-          this.logger.warn({ err: String(err) }, 'sendPlan terminal failed'),
+          this.logger.warn({ err: String(err), sessionId }, 'sendPlan terminal failed'),
         );
+      this.logger.info(
+        { sessionId },
+        '_executePlan: final sendPlan dispatched (Promise pending)',
+      );
     } catch (err) {
+      this.logger.info(
+        {
+          sessionId,
+          errType: err === null || err === undefined ? 'null/undefined' : typeof err,
+          errName: err instanceof Error ? err.name : '(not Error)',
+          errMessage: err instanceof Error ? err.message : String(err),
+          isPlanAborted: err instanceof PlanAbortedError,
+        },
+        '_executePlan: caught error in try block',
+      );
       let failureInfo: string;
       if (err instanceof PlanAbortedError) {
         const detail =
@@ -655,6 +705,7 @@ export class Foreman {
       await this.acpServer.sendUpdate(sessionId, [{ type: 'text', text: summary }]);
       return;
     } finally {
+      this.logger.info({ sessionId }, '_executePlan: finally block entered');
       this._executionStates.delete(sessionId);
       const plannerSession = this._plannerSessions.get(sessionId);
       if (plannerSession) {
@@ -667,6 +718,10 @@ export class Foreman {
       sessionState.planOwnerRef = null;
     }
 
+    this.logger.info(
+      { sessionId, resultsCount: results.length },
+      '_executePlan: about to invoke _synthesize',
+    );
     const summary = await this._synthesize(results, userText);
     await this.acpServer.sendUpdate(sessionId, [{ type: 'text', text: summary }]);
   }
