@@ -580,6 +580,7 @@ export class Foreman {
         // Status events with tool-call titles → accumulate activity log
         if (event.type === 'status') {
           const toolTitle = extractToolActivityTitle(event);
+          this.logger.debug({ subtaskId, toolTitle, hasTitle: toolTitle !== null }, 'tool activity extracted');
           if (toolTitle) {
             const lines = subtaskActivityLog.get(subtaskId) ?? [];
             const last = lines[lines.length - 1];

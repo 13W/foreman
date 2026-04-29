@@ -136,12 +136,19 @@ export function extractToolActivityTitle(event: StreamEvent): string | null {
   if (!data) return null;
   if (data['state'] !== 'working') return null;
 
-  const message = data['message'];
-  if (typeof message !== 'string') return null;
-  if (!message.trim()) return null;
+  // Resolve title from flat shape (data.message = string) or
+  // double-wrapped shape (data.message = {state, message: string}).
+  let titleSource: unknown = data['message'];
+  if (titleSource && typeof titleSource === 'object') {
+    const inner = titleSource as Record<string, unknown>;
+    titleSource = inner['message'];
+  }
+
+  if (typeof titleSource !== 'string') return null;
+  if (!titleSource.trim()) return null;
 
   // Filter out bare toolCallId strings emitted as update markers
-  if (/^toolu_[A-Za-z0-9_-]+$/.test(message)) return null;
+  if (/^toolu_[A-Za-z0-9_-]+$/.test(titleSource)) return null;
 
-  return message;
+  return titleSource;
 }

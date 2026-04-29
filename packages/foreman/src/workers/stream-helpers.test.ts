@@ -59,4 +59,48 @@ describe('extractToolActivityTitle', () => {
     const event: StreamEvent = { type: 'status', taskId: 'test', data: null, timestamp: '' };
     expect(extractToolActivityTitle(event)).toBeNull();
   });
+
+  it('extracts title from double-wrapped status event', () => {
+    const event = {
+      type: 'status',
+      data: {
+        state: 'working',
+        message: { state: 'working', message: 'Read deployment/auth.yaml' },
+      },
+    } as unknown as StreamEvent;
+    expect(extractToolActivityTitle(event)).toBe('Read deployment/auth.yaml');
+  });
+
+  it('returns null for double-wrapped event with toolu_xxx inner message', () => {
+    const event = {
+      type: 'status',
+      data: {
+        state: 'working',
+        message: { state: 'working', message: 'toolu_01ABC' },
+      },
+    } as unknown as StreamEvent;
+    expect(extractToolActivityTitle(event)).toBeNull();
+  });
+
+  it('returns null when double-wrapped inner message is empty', () => {
+    const event = {
+      type: 'status',
+      data: {
+        state: 'working',
+        message: { state: 'working', message: '' },
+      },
+    } as unknown as StreamEvent;
+    expect(extractToolActivityTitle(event)).toBeNull();
+  });
+
+  it('returns title from double-wrapped event regardless of inner state', () => {
+    const event = {
+      type: 'status',
+      data: {
+        state: 'working',
+        message: { state: 'completed', message: 'Edit file.ts' },
+      },
+    } as unknown as StreamEvent;
+    expect(extractToolActivityTitle(event)).toBe('Edit file.ts');
+  });
 });
