@@ -570,7 +570,7 @@ export class Foreman {
 
     let results: string[];
     try {
-      this.logger.info(
+      this.logger.debug(
         {
           sessionId,
           planId: plan.plan_id,
@@ -580,7 +580,7 @@ export class Foreman {
         '_executePlan: about to invoke PlanExecutor.execute',
       );
       const { subtaskResults } = await executor.execute(plan, userText);
-      this.logger.info(
+      this.logger.debug(
         {
           sessionId,
           planId: plan.plan_id,
@@ -596,7 +596,7 @@ export class Foreman {
 
       // Terminal: mark all completed subtasks
       for (const { subtaskId, result } of subtaskResults) {
-        this.logger.info(
+        this.logger.debug(
           {
             sessionId,
             subtaskId,
@@ -618,7 +618,7 @@ export class Foreman {
           planEntries[idx] = { ...planEntries[idx], status: 'completed' };
         }
       }
-      this.logger.info(
+      this.logger.debug(
         {
           sessionId,
           planEntriesCount: planEntries.length,
@@ -631,12 +631,12 @@ export class Foreman {
         .catch((err: unknown) =>
           this.logger.warn({ err: String(err), sessionId }, 'sendPlan terminal failed'),
         );
-      this.logger.info(
+      this.logger.debug(
         { sessionId },
         '_executePlan: final sendPlan dispatched (Promise pending)',
       );
     } catch (err) {
-      this.logger.info(
+      this.logger.debug(
         {
           sessionId,
           errType: err === null || err === undefined ? 'null/undefined' : typeof err,
@@ -705,7 +705,7 @@ export class Foreman {
       await this.acpServer.sendUpdate(sessionId, [{ type: 'text', text: summary }]);
       return;
     } finally {
-      this.logger.info({ sessionId }, '_executePlan: finally block entered');
+      this.logger.debug({ sessionId }, '_executePlan: finally block entered');
       this._executionStates.delete(sessionId);
       const plannerSession = this._plannerSessions.get(sessionId);
       if (plannerSession) {
@@ -718,7 +718,7 @@ export class Foreman {
       sessionState.planOwnerRef = null;
     }
 
-    this.logger.info(
+    this.logger.debug(
       { sessionId, resultsCount: results.length },
       '_executePlan: about to invoke _synthesize',
     );
