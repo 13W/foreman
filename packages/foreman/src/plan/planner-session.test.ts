@@ -59,61 +59,59 @@ const baseConfig: ForemanConfig = {
 };
 
 // ---------------------------------------------------------------------------
-// MockHandle factory  (mirrors executor.test.ts pattern)
+// MockHandle factory  (push-based: onEvent/waitForDone/cancel/release)
 // ---------------------------------------------------------------------------
 
 interface MockHandleControl {
   handle: DispatchHandle;
   push: (event: StreamEvent) => void;
   complete: () => void;
+  fail: (err: Error) => void;
   isCancelled: () => boolean;
 }
 
 function makeMockHandle(taskId: string): MockHandleControl {
-  const queue: StreamEvent[] = [];
-  const waiters: Array<(r: IteratorResult<StreamEvent>) => void> = [];
-  let terminated = false;
+  const listeners: Array<(e: StreamEvent) => void> = [];
+  const buffered: StreamEvent[] = [];
+  let doneResolve!: () => void;
+  let doneReject!: (err: Error) => void;
+  const donePromise = new Promise<void>((res, rej) => {
+    doneResolve = res;
+    doneReject = rej;
+  });
   let cancelled = false;
 
-  const gen = {
-    async next(): Promise<IteratorResult<StreamEvent>> {
-      if (queue.length > 0) return { value: queue.shift()!, done: false };
-      if (terminated) return { value: undefined as unknown as StreamEvent, done: true };
-      return new Promise<IteratorResult<StreamEvent>>((resolve) => waiters.push(resolve));
+  const handle = {
+    taskId,
+    agentUrl: 'http://planner.local',
+    onEvent(listener: (e: StreamEvent) => void): () => void {
+      for (const e of buffered) listener(e);
+      buffered.length = 0;
+      listeners.push(listener);
+      return () => {
+        const idx = listeners.indexOf(listener);
+        if (idx >= 0) listeners.splice(idx, 1);
+      };
     },
-    async return(value?: unknown): Promise<IteratorResult<StreamEvent>> {
-      terminated = true;
-      for (const w of waiters) w({ value: undefined as unknown as StreamEvent, done: true });
-      waiters.length = 0;
-      queue.length = 0;
-      return { value: value as StreamEvent, done: true };
-    },
-    async throw(err?: unknown): Promise<IteratorResult<StreamEvent>> {
-      terminated = true;
-      throw err;
-    },
-    [Symbol.asyncIterator]() { return this as AsyncGenerator<StreamEvent>; },
-    async [Symbol.asyncDispose]() { await gen.return(undefined); },
-  };
-
-  const cancelFn = async () => {
-    cancelled = true;
-    await gen.return(undefined);
-  };
-
-  const handle = new DispatchHandle(taskId, 'http://planner.local', gen as unknown as AsyncGenerator<StreamEvent>, cancelFn);
+    waitForDone(): Promise<void> { return donePromise; },
+    cancel: vi.fn(async () => {
+      cancelled = true;
+      doneResolve();
+    }),
+    release: vi.fn(),
+  } as unknown as DispatchHandle;
 
   return {
     handle,
     push(event: StreamEvent) {
-      if (waiters.length > 0) waiters.shift()!({ value: event, done: false });
-      else queue.push(event);
+      if (listeners.length === 0) {
+        buffered.push(event);
+      } else {
+        for (const l of [...listeners]) l(event);
+      }
     },
-    complete() {
-      terminated = true;
-      for (const w of waiters) w({ value: undefined as unknown as StreamEvent, done: true });
-      waiters.length = 0;
-    },
+    complete() { doneResolve(); },
+    fail(err: Error) { doneReject(err); },
     isCancelled: () => cancelled,
   };
 }
@@ -203,7 +201,8 @@ describe('ExternalPlannerSession', () => {
     a2aClient = {
       fetchAgentCard: vi.fn(),
       dispatchTask: vi.fn(),
-      streamTask: vi.fn(),
+      subscribe: vi.fn(),
+      waitForDone: vi.fn(),
       pollTask: vi.fn(),
       cancelTask: vi.fn(),
       respondToPermission: vi.fn(),
@@ -471,7 +470,7 @@ describe('cross-mode parity: open + getPlan() shape + close()', () => {
     ctrl.push(makeCompletedWithPlanEvent(MINIMAL_PLAN));
     const mockDispatch = vi.fn().mockResolvedValue(ctrl.handle);
     const a2aClient: A2AClient = {
-      fetchAgentCard: vi.fn(), dispatchTask: vi.fn(), streamTask: vi.fn(),
+      fetchAgentCard: vi.fn(), dispatchTask: vi.fn(), subscribe: vi.fn(), waitForDone: vi.fn(),
       pollTask: vi.fn(), cancelTask: vi.fn(), respondToPermission: vi.fn(),
       sendFollowUp: vi.fn().mockResolvedValue(undefined),
     };
@@ -569,7 +568,7 @@ describe('ExternalPlannerSession — ACP plan events (primary path)', () => {
   function makeSession(ctrl: MockHandleControl) {
     const mockDispatch = vi.fn().mockResolvedValue(ctrl.handle);
     const a2aClient: A2AClient = {
-      fetchAgentCard: vi.fn(), dispatchTask: vi.fn(), streamTask: vi.fn(),
+      fetchAgentCard: vi.fn(), dispatchTask: vi.fn(), subscribe: vi.fn(), waitForDone: vi.fn(),
       pollTask: vi.fn(), cancelTask: vi.fn(), respondToPermission: vi.fn(),
       sendFollowUp: vi.fn().mockResolvedValue(undefined),
     };
@@ -647,7 +646,7 @@ describe('ExternalPlannerSession — ask() injects execution state', () => {
     const ctrl = makeMockHandle(taskId);
     const mockSendFollowUp = vi.fn().mockResolvedValue(undefined);
     const a2aClient: A2AClient = {
-      fetchAgentCard: vi.fn(), dispatchTask: vi.fn(), streamTask: vi.fn(),
+      fetchAgentCard: vi.fn(), dispatchTask: vi.fn(), subscribe: vi.fn(), waitForDone: vi.fn(),
       pollTask: vi.fn(), cancelTask: vi.fn(), respondToPermission: vi.fn(),
       sendFollowUp: mockSendFollowUp,
     };
@@ -683,7 +682,7 @@ describe('ExternalPlannerSession — ask() injects execution state', () => {
     const ctrl = makeMockHandle(taskId);
     const mockSendFollowUp = vi.fn().mockResolvedValue(undefined);
     const a2aClient: A2AClient = {
-      fetchAgentCard: vi.fn(), dispatchTask: vi.fn(), streamTask: vi.fn(),
+      fetchAgentCard: vi.fn(), dispatchTask: vi.fn(), subscribe: vi.fn(), waitForDone: vi.fn(),
       pollTask: vi.fn(), cancelTask: vi.fn(), respondToPermission: vi.fn(),
       sendFollowUp: mockSendFollowUp,
     };
@@ -750,7 +749,7 @@ describe('ExternalPlannerSession — execution phase filtering', () => {
   function makeSession(ctrl: MockHandleControl) {
     const mockDispatch = vi.fn().mockResolvedValue(ctrl.handle);
     const a2aClient: A2AClient = {
-      fetchAgentCard: vi.fn(), dispatchTask: vi.fn(), streamTask: vi.fn(),
+      fetchAgentCard: vi.fn(), dispatchTask: vi.fn(), subscribe: vi.fn(), waitForDone: vi.fn(),
       pollTask: vi.fn(), cancelTask: vi.fn(), respondToPermission: vi.fn(),
       sendFollowUp: vi.fn().mockResolvedValue(undefined),
     };

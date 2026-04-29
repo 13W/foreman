@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { EventEmitter } from 'node:events';
 import { ClientFactory, ClientFactoryOptions, DefaultAgentCardResolver } from '@a2a-js/sdk/client';
 import type { Client } from '@a2a-js/sdk/client';
 import { AGENT_CARD_PATH } from '@a2a-js/sdk';
@@ -13,9 +14,17 @@ type SdkStreamEvent = Message | Task | TaskStatusUpdateEvent | TaskArtifactUpdat
 
 const TERMINAL_STATES = new Set(['completed', 'canceled', 'failed', 'rejected']);
 
+const POLL_INITIAL_INTERVAL_MS = 2_000;
+const POLL_MAX_INTERVAL_MS = 30_000;
+const POLL_MAX_CONSECUTIVE_FAILURES = 10;
+
 interface TaskEntry {
   client: Client;
   contextId: string;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export interface DefaultA2AClientOptions {
@@ -24,15 +33,27 @@ export interface DefaultA2AClientOptions {
   msgLogger?: MsgLogger;
 }
 
-export class DefaultA2AClient implements A2AClient {
+/**
+ * Push-based A2A client.
+ *
+ * Events emitted:
+ *   'task:<taskId>'       — every mapped StreamEvent for that task
+ *   'task:<taskId>:done'  — emitted once when pump exits cleanly
+ *   'task:<taskId>:error' — emitted if pump errors out
+ */
+export class DefaultA2AClient extends EventEmitter implements A2AClient {
   private readonly _factory: ClientFactory;
   private readonly _resolver: DefaultAgentCardResolver;
   private readonly _clientCache = new Map<string, Client>();
   private readonly _taskRegistry = new Map<string, TaskEntry>();
-  private readonly _streamRegistry = new Map<string, AsyncGenerator<SdkStreamEvent>>();
+  private readonly _activeStreams = new Map<string, AbortController>();
+  private readonly _taskErrors = new Map<string, Error>();
   private readonly _msgLogger?: MsgLogger;
 
   constructor(options: DefaultA2AClientOptions = {}) {
+    super();
+    // Bump max listeners — one per active subscriber per task plus done/error listeners.
+    this.setMaxListeners(1000);
     this._factory = new ClientFactory(ClientFactoryOptions.default);
     this._resolver = new DefaultAgentCardResolver({
       path: options.agentCardPath ?? AGENT_CARD_PATH,
@@ -85,28 +106,45 @@ export class DefaultA2AClient implements A2AClient {
     }
 
     const task = firstResult.value as Task;
-    this._streamRegistry.set(task.id, stream);
     this._taskRegistry.set(task.id, { client, contextId: task.contextId });
     this._msgLogger?.log('in', 'a2a', 'task_ack', { taskId: task.id }, { taskId: task.id });
-    logger.debug({ taskId: task.id, agentUrl: url }, 'task dispatched');
+    logger.debug({ taskId: task.id, agentUrl: url }, 'task dispatched, pump started');
+
+    const ac = new AbortController();
+    this._activeStreams.set(task.id, ac);
+    void this._pumpStream(task.id, stream, ac.signal);
+
     return task.id;
   }
 
-  async *streamTask(taskId: string): AsyncIterableIterator<StreamEvent> {
-    this._requireTaskEntry(taskId);
-    const stream = this._streamRegistry.get(taskId);
-    if (!stream) throw new TaskNotFoundError(taskId);
+  subscribe(taskId: string, listener: (event: StreamEvent) => void): () => void {
+    const eventName = `task:${taskId}`;
+    this.on(eventName, listener);
+    return () => this.off(eventName, listener);
+  }
 
-    try {
-      for await (const event of stream) {
-        const mapped = mapSdkEvent(taskId, event as SdkStreamEvent);
-        this._msgLogger?.log('in', 'a2a', mapped.type, mapped, { taskId });
-        yield mapped;
-        if (isTerminal(event as SdkStreamEvent)) return;
-      }
-    } finally {
-      this._streamRegistry.delete(taskId);
+  waitForDone(taskId: string): Promise<void> {
+    // Pump may have already exited — check registry first so we don't hang.
+    const storedError = this._taskErrors.get(taskId);
+    if (storedError) {
+      this._taskErrors.delete(taskId);
+      return Promise.reject(storedError);
     }
+    if (!this._taskRegistry.has(taskId)) {
+      return Promise.resolve();
+    }
+    return new Promise((resolve, reject) => {
+      const onDone = () => {
+        this.off(`task:${taskId}:error`, onError);
+        resolve();
+      };
+      const onError = (err: unknown) => {
+        this.off(`task:${taskId}:done`, onDone);
+        reject(err instanceof Error ? err : new Error(String(err)));
+      };
+      this.once(`task:${taskId}:done`, onDone);
+      this.once(`task:${taskId}:error`, onError);
+    });
   }
 
   async pollTask(taskId: string): Promise<StreamEvent> {
@@ -121,8 +159,10 @@ export class DefaultA2AClient implements A2AClient {
   }
 
   async cancelTask(taskId: string): Promise<void> {
-    const entry = this._requireTaskEntry(taskId);
+    const entry = this._taskRegistry.get(taskId);
+    if (!entry) return;
     await entry.client.cancelTask({ id: taskId });
+    this._activeStreams.get(taskId)?.abort();
   }
 
   async respondToPermission(taskId: string, decision: PermissionDecision): Promise<void> {
@@ -143,6 +183,101 @@ export class DefaultA2AClient implements A2AClient {
         parts: parts as any,
       },
     });
+  }
+
+  private async _pumpStream(
+    taskId: string,
+    stream: AsyncGenerator<SdkStreamEvent>,
+    signal: AbortSignal,
+  ): Promise<void> {
+    // Interrupt the stream when abort fires so the for-await loop can exit promptly.
+    const onAbort = () => { void stream.return(undefined); };
+    signal.addEventListener('abort', onAbort, { once: true });
+
+    try {
+      // Primary path: SSE streaming
+      try {
+        for await (const event of stream) {
+          if (signal.aborted) break;
+          const mapped = mapSdkEvent(taskId, event as SdkStreamEvent);
+          this._msgLogger?.log('in', 'a2a', mapped.type, mapped, { taskId });
+          this.emit(`task:${taskId}`, mapped);
+          if (isTerminal(event as SdkStreamEvent)) {
+            this.emit(`task:${taskId}:done`);
+            return;
+          }
+        }
+        // Stream ended (naturally or via abort)
+        this.emit(`task:${taskId}:done`);
+        return;
+      } catch (streamErr) {
+        if (signal.aborted) {
+          this.emit(`task:${taskId}:done`);
+          return;
+        }
+        logger.debug({ taskId, err: String(streamErr) }, 'stream failed, falling back to polling');
+      }
+
+      // Fallback path: polling
+      let intervalMs = POLL_INITIAL_INTERVAL_MS;
+      let consecutiveFailures = 0;
+
+      while (!signal.aborted) {
+        const entry = this._taskRegistry.get(taskId);
+        if (!entry) break;
+
+        try {
+          const task = await entry.client.getTask({ id: taskId });
+          consecutiveFailures = 0;
+          const event: StreamEvent = {
+            type: 'status',
+            taskId,
+            data: { state: task.status.state },
+            timestamp: task.status.timestamp,
+          };
+          this._msgLogger?.log('in', 'a2a', 'poll', event, { taskId });
+          this.emit(`task:${taskId}`, event);
+          if (TERMINAL_STATES.has(task.status.state)) {
+            this.emit(`task:${taskId}:done`);
+            return;
+          }
+        } catch (pollErr) {
+          consecutiveFailures++;
+          logger.debug({ taskId, consecutiveFailures, err: String(pollErr) }, 'poll attempt failed');
+          if (consecutiveFailures >= POLL_MAX_CONSECUTIVE_FAILURES) {
+            const errorEvent: StreamEvent = {
+              type: 'error',
+              taskId,
+              data: { reason: 'connection_lost' },
+              timestamp: new Date().toISOString(),
+            };
+            this.emit(`task:${taskId}`, errorEvent);
+            this.emit(`task:${taskId}:done`);
+            return;
+          }
+        }
+
+        await sleep(intervalMs);
+        intervalMs = Math.min(intervalMs * 2, POLL_MAX_INTERVAL_MS);
+      }
+
+      // Aborted during poll loop
+      this.emit(`task:${taskId}:done`);
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      logger.warn({ taskId, err: String(err) }, 'a2a stream pump errored');
+      this._taskErrors.set(taskId, error);
+      this.emit(`task:${taskId}:error`, error);
+    } finally {
+      signal.removeEventListener('abort', onAbort);
+      this._activeStreams.delete(taskId);
+      this._taskRegistry.delete(taskId);
+      // Remove all listeners for this task — pump is gone, no more events possible.
+      // done/error listeners were already fired (and auto-removed via once), but clean up extras.
+      this.removeAllListeners(`task:${taskId}`);
+      this.removeAllListeners(`task:${taskId}:done`);
+      this.removeAllListeners(`task:${taskId}:error`);
+    }
   }
 
   private async _getOrCreateClient(url: string): Promise<Client> {

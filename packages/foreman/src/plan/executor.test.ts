@@ -9,82 +9,64 @@ import { PlanAbortedError, PlanExecutor } from './executor.js';
 import pino from 'pino';
 
 // ---------------------------------------------------------------------------
-// Types for mock control
+// Mock DispatchHandle factory
 // ---------------------------------------------------------------------------
 
 interface MockHandleControl {
   handle: DispatchHandle;
-  push: (event: StreamEvent) => void;
+  emit: (event: StreamEvent) => void;
   complete: () => void;
+  fail: (err: Error) => void;
   isCancelled: () => boolean;
 }
 
-// ---------------------------------------------------------------------------
-// Mock DispatchHandle factory
-// ---------------------------------------------------------------------------
-
 function makeMockHandle(taskId: string, agentUrl = 'http://mock.test'): MockHandleControl {
-  const queue: StreamEvent[] = [];
-  const waiters: Array<(result: IteratorResult<StreamEvent>) => void> = [];
-  let terminated = false;
+  const listeners: Array<(event: StreamEvent) => void> = [];
+  const buffered: StreamEvent[] = [];
+  let doneResolve!: () => void;
+  let doneReject!: (err: Error) => void;
+  const donePromise = new Promise<void>((res, rej) => {
+    doneResolve = res;
+    doneReject = rej;
+  });
   let cancelled = false;
 
-  const genBase = {
-    async next(): Promise<IteratorResult<StreamEvent>> {
-      if (queue.length > 0) {
-        return { value: queue.shift()!, done: false };
-      }
-      if (terminated) {
-        return { value: undefined as unknown as StreamEvent, done: true };
-      }
-      return new Promise<IteratorResult<StreamEvent>>((resolve) => {
-        waiters.push(resolve);
-      });
+  const handle = {
+    taskId,
+    agentUrl,
+    onEvent(listener: (event: StreamEvent) => void): () => void {
+      // Deliver buffered events to late subscribers
+      for (const e of buffered) listener(e);
+      listeners.push(listener);
+      return () => {
+        const idx = listeners.indexOf(listener);
+        if (idx >= 0) listeners.splice(idx, 1);
+      };
     },
-    async return(value?: unknown): Promise<IteratorResult<StreamEvent>> {
-      terminated = true;
-      for (const w of waiters) {
-        w({ value: undefined as unknown as StreamEvent, done: true });
-      }
-      waiters.length = 0;
-      queue.length = 0;
-      return { value: value as StreamEvent, done: true };
+    waitForDone(): Promise<void> {
+      return donePromise;
     },
-    async throw(err?: unknown): Promise<IteratorResult<StreamEvent>> {
-      terminated = true;
-      throw err;
-    },
-    [Symbol.asyncIterator]() {
-      return this as AsyncGenerator<StreamEvent>;
-    },
-    async [Symbol.asyncDispose](): Promise<void> {
-      await genBase.return(undefined);
-    },
-  };
-  const gen = genBase as unknown as AsyncGenerator<StreamEvent>;
-
-  const cancelFn = async () => {
-    cancelled = true;
-    await gen.return(undefined);
-  };
-
-  const handle = new DispatchHandle(taskId, agentUrl, gen, cancelFn);
+    cancel: vi.fn(async () => {
+      cancelled = true;
+      doneResolve();
+    }),
+    release: vi.fn(),
+  } as unknown as DispatchHandle;
 
   return {
     handle,
-    push(event: StreamEvent) {
-      if (waiters.length > 0) {
-        waiters.shift()!({ value: event, done: false });
+    emit(event: StreamEvent) {
+      if (listeners.length > 0) {
+        for (const l of [...listeners]) l(event);
       } else {
-        queue.push(event);
+        buffered.push(event);
       }
     },
     complete() {
-      terminated = true;
-      for (const w of waiters) {
-        w({ value: undefined as unknown as StreamEvent, done: true });
-      }
-      waiters.length = 0;
+      doneResolve();
+    },
+    fail(err: Error) {
+      doneReject(err);
     },
     isCancelled: () => cancelled,
   };
@@ -281,7 +263,7 @@ describe('PlanExecutor', () => {
   // -------------------------------------------------------------------------
 
   it('single-batch single-subtask plan succeeds', async () => {
-    const { handle, push, complete } = makeMockHandle('task-1');
+    const { handle, emit, complete } = makeMockHandle('task-1');
     mockDispatch.mockResolvedValueOnce(handle);
 
     const { executor } = makeExecutor(mockDispatch);
@@ -289,7 +271,7 @@ describe('PlanExecutor', () => {
 
     const executePromise = executor.execute(plan, 'test intent');
 
-    push(makeCompletedStatusEvent('task-1'));
+    emit(makeCompletedStatusEvent('task-1'));
     complete();
 
     const result = await executePromise;
@@ -323,7 +305,7 @@ describe('PlanExecutor', () => {
     expect(mockDispatch).toHaveBeenCalledTimes(1);
 
     // Complete batch 1
-    ctrl1.push(makeCompletedStatusEvent('task-1'));
+    ctrl1.emit(makeCompletedStatusEvent('task-1'));
     ctrl1.complete();
 
     // Give event loop time to advance to batch 2 dispatch
@@ -331,7 +313,7 @@ describe('PlanExecutor', () => {
     expect(mockDispatch).toHaveBeenCalledTimes(2);
 
     // Complete batch 2
-    ctrl2.push(makeCompletedStatusEvent('task-2'));
+    ctrl2.emit(makeCompletedStatusEvent('task-2'));
     ctrl2.complete();
 
     await executePromise;
@@ -351,7 +333,7 @@ describe('PlanExecutor', () => {
 
     const executePromise = executor.execute(plan, 'test').catch(() => {});
 
-    ctrl1.push(makeFailedStatusEvent('task-1'));
+    ctrl1.emit(makeFailedStatusEvent('task-1'));
     ctrl1.complete();
 
     await executePromise;
@@ -408,12 +390,73 @@ describe('PlanExecutor', () => {
     dispatchResolvers.forEach((r) => r());
     await Promise.resolve();
     controls.forEach((ctrl, i) => {
-      ctrl.push(makeCompletedStatusEvent(`task-${i}`));
+      ctrl.emit(makeCompletedStatusEvent(`task-${i}`));
       ctrl.complete();
     });
 
     const result = await executePromise;
     expect(result.subtaskResults).toHaveLength(3);
+  });
+
+  // -------------------------------------------------------------------------
+  // Concurrent streaming regression test
+  // -------------------------------------------------------------------------
+
+  it('3 concurrent tasks receive interleaved events without blocking each other', async () => {
+    const ctrl0 = makeMockHandle('task-0');
+    const ctrl1 = makeMockHandle('task-1');
+    const ctrl2 = makeMockHandle('task-2');
+
+    mockDispatch
+      .mockResolvedValueOnce(ctrl0.handle)
+      .mockResolvedValueOnce(ctrl1.handle)
+      .mockResolvedValueOnce(ctrl2.handle);
+
+    const receivedBySubtask: Record<string, StreamEvent[]> = { s0: [], s1: [], s2: [] };
+    const { executor } = makeExecutor(mockDispatch, {
+      workerNames: ['worker-a', 'worker-b', 'worker-c'],
+      onSubtaskEvent: (subtaskId, event) => {
+        receivedBySubtask[subtaskId]?.push(event);
+      },
+    });
+
+    const plan = makePlan([
+      {
+        batchId: 'b1',
+        subtasks: [
+          { id: 's0', agent: 'worker-a' },
+          { id: 's1', agent: 'worker-b' },
+          { id: 's2', agent: 'worker-c' },
+        ],
+      },
+    ]);
+
+    const executePromise = executor.execute(plan, 'test');
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // Emit events in interleaved order across all three tasks
+    ctrl0.emit(makeTextMessageEvent('msg-0', 'task-0'));
+    ctrl1.emit(makeTextMessageEvent('msg-1', 'task-1'));
+    ctrl2.emit(makeTextMessageEvent('msg-2', 'task-2'));
+
+    // Complete in reverse order
+    ctrl2.emit(makeCompletedStatusEvent('task-2'));
+    ctrl2.complete();
+
+    ctrl0.emit(makeCompletedStatusEvent('task-0'));
+    ctrl0.complete();
+
+    ctrl1.emit(makeCompletedStatusEvent('task-1'));
+    ctrl1.complete();
+
+    const result = await executePromise;
+
+    // Each subtask received exactly its own events
+    expect(result.subtaskResults).toHaveLength(3);
+    expect(receivedBySubtask['s0'].some((e) => e.type === 'message')).toBe(true);
+    expect(receivedBySubtask['s1'].some((e) => e.type === 'message')).toBe(true);
+    expect(receivedBySubtask['s2'].some((e) => e.type === 'message')).toBe(true);
   });
 
   // -------------------------------------------------------------------------
@@ -428,7 +471,7 @@ describe('PlanExecutor', () => {
     const plan = makePlan([{ batchId: 'b1', subtasks: [{ id: 's1', agent: 'worker-a' }] }]);
 
     const executePromise = executor.execute(plan, 'test');
-    ctrl.push(makeFailedStatusEvent('task-1'));
+    ctrl.emit(makeFailedStatusEvent('task-1'));
     ctrl.complete();
 
     await expect(executePromise).rejects.toThrow(PlanAbortedError);
@@ -468,7 +511,7 @@ describe('PlanExecutor', () => {
     await Promise.resolve();
 
     // s1 fails
-    ctrl1.push(makeFailedStatusEvent('task-1'));
+    ctrl1.emit(makeFailedStatusEvent('task-1'));
     ctrl1.complete();
 
     await executePromise;
@@ -497,7 +540,7 @@ describe('PlanExecutor', () => {
     // Handle should be registered
     expect(sessionState.activeDispatchHandles.has('task-1')).toBe(true);
 
-    ctrl.push(makeCompletedStatusEvent('task-1'));
+    ctrl.emit(makeCompletedStatusEvent('task-1'));
     ctrl.complete();
 
     await executePromise;
@@ -521,8 +564,8 @@ describe('PlanExecutor', () => {
     const executePromise = executor.execute(plan, 'test');
 
     // Push permission event then completed
-    ctrl.push(makePermissionEvent('task-1'));
-    ctrl.push(makeCompletedStatusEvent('task-1'));
+    ctrl.emit(makePermissionEvent('task-1'));
+    ctrl.emit(makeCompletedStatusEvent('task-1'));
     ctrl.complete();
 
     await executePromise;
@@ -543,7 +586,8 @@ describe('PlanExecutor', () => {
 
     const executePromise = executor.execute(plan, 'test');
 
-    ctrl.push(makePermissionEvent('task-1'));
+    // Permission event fires escalation, which rejects — finishError should propagate
+    ctrl.emit(makePermissionEvent('task-1'));
     ctrl.complete();
 
     await expect(executePromise).rejects.toThrow('no escalation handler installed');
@@ -567,8 +611,8 @@ describe('PlanExecutor', () => {
 
     const msgEvent = makeTextMessageEvent('hello', 'task-1');
     const statusEvent = makeCompletedStatusEvent('task-1');
-    ctrl.push(msgEvent);
-    ctrl.push(statusEvent);
+    ctrl.emit(msgEvent);
+    ctrl.emit(statusEvent);
     ctrl.complete();
 
     await executePromise;
@@ -593,8 +637,8 @@ describe('PlanExecutor', () => {
 
     const executePromise = executor.execute(plan, 'test');
 
-    ctrl.push(makePermissionEvent('task-1'));
-    ctrl.push(makeCompletedStatusEvent('task-1'));
+    ctrl.emit(makePermissionEvent('task-1'));
+    ctrl.emit(makeCompletedStatusEvent('task-1'));
     ctrl.complete();
 
     await executePromise;
@@ -604,5 +648,24 @@ describe('PlanExecutor', () => {
     expect(subtaskEvents[0].type).toBe('status');
     // Permission event should NOT be in subtaskEvents
     expect(escalationFn).toHaveBeenCalledOnce();
+  });
+
+  // -------------------------------------------------------------------------
+  // release() is called exactly once per consumed task
+  // -------------------------------------------------------------------------
+
+  it('calls handle.release() exactly once after task completes', async () => {
+    const ctrl = makeMockHandle('task-1');
+    mockDispatch.mockResolvedValueOnce(ctrl.handle);
+
+    const { executor } = makeExecutor(mockDispatch);
+    const plan = makePlan([{ batchId: 'b1', subtasks: [{ id: 's1', agent: 'worker-a' }] }]);
+
+    const executePromise = executor.execute(plan, 'test');
+    ctrl.emit(makeCompletedStatusEvent('task-1'));
+    ctrl.complete();
+    await executePromise;
+
+    expect((ctrl.handle.release as ReturnType<typeof vi.fn>)).toHaveBeenCalledOnce();
   });
 });

@@ -78,10 +78,21 @@ function makeHandle(
   events: StreamEvent[],
   cancelFn = vi.fn().mockResolvedValue(undefined) as () => Promise<void>,
 ): DispatchHandle {
-  async function* gen() {
-    yield* events;
-  }
-  return new DispatchHandle(taskId, url, gen(), cancelFn);
+  let doneResolve!: () => void;
+  const donePromise = new Promise<void>((res) => { doneResolve = res; });
+
+  return {
+    taskId,
+    agentUrl: url,
+    onEvent(listener: (e: StreamEvent) => void): () => void {
+      for (const e of events) listener(e);
+      doneResolve();
+      return () => {};
+    },
+    waitForDone(): Promise<void> { return donePromise; },
+    cancel: cancelFn,
+    release: vi.fn(),
+  } as unknown as DispatchHandle;
 }
 
 function makeCompletedStatusEvent(taskId: string): StreamEvent {

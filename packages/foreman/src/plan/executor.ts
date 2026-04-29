@@ -172,68 +172,120 @@ export class PlanExecutor {
     });
   }
 
-  private async _consumeHandle(handle: DispatchHandle, subtaskId: string): Promise<TaskResult> {
-    let structuredResult: TaskResult | null = null;
-    let fallbackText = '';
+  private _consumeHandle(handle: DispatchHandle, subtaskId: string): Promise<TaskResult> {
+    return new Promise<TaskResult>((resolve, reject) => {
+      let structuredResult: TaskResult | null = null;
+      let fallbackText = '';
+      let settled = false;
 
-    for await (const event of handle) {
-      if (isPermissionEvent(event)) {
-        const req = extractPermissionRequest(event);
-        if (req) {
-          await this._onWorkerEscalation(handle.taskId, req);
-        }
-      } else {
-        this._onSubtaskEvent(subtaskId, event);
-        if (event.type === 'status') {
-          const data = event.data as Record<string, unknown> | null | undefined;
-          const state = data?.['state'] as string | undefined;
-          const final = data?.['final'] as boolean | undefined;
-          if (state) this._logger.info({ subtaskId, taskId: handle.taskId, state, final }, 'subtask status');
-          const parsed = extractStatusResult(event);
-          if (parsed) structuredResult = parsed;
-          // Permissive follow-up: worker completed one turn and is waiting for more work.
-          // We only want one turn per subtask, so extract the result and cancel.
-          if (!parsed) {
-            const followUp = extractFollowUpResult(event);
-            if (followUp) {
-              structuredResult = followUp;
-              await handle.cancel();
-              break;
+      const finish = (result: TaskResult) => {
+        if (settled) return;
+        settled = true;
+        unsubscribe();
+        handle.release();
+        resolve(result);
+      };
+
+      const finishError = (err: Error) => {
+        if (settled) return;
+        settled = true;
+        unsubscribe();
+        handle.release();
+        reject(err);
+      };
+
+      const onEvent = (event: StreamEvent) => {
+        if (settled) return;
+
+        try {
+          if (isPermissionEvent(event)) {
+            const req = extractPermissionRequest(event);
+            if (req) {
+              // Fire-and-forget: pump must not block on escalation.
+              // If escalation throws, propagate via finishError.
+              this._onWorkerEscalation(handle.taskId, req).catch((err) => {
+                this._logger.warn(
+                  { subtaskId, taskId: handle.taskId, err: String(err) },
+                  'escalation handler error',
+                );
+                finishError(err instanceof Error ? err : new Error(String(err)));
+              });
             }
+            return;
           }
-        } else if (event.type === 'artifact') {
-          fallbackText = extractArtifactText(event);
-        } else if (event.type === 'message') {
-          const text = extractMessageText(event);
-          if (text) {
-            this._logger.info({ subtaskId, taskId: handle.taskId, message: text.slice(0, 200) }, 'subtask message');
-            fallbackText += text;
+
+          this._onSubtaskEvent(subtaskId, event);
+
+          if (event.type === 'status') {
+            const data = event.data as Record<string, unknown> | null | undefined;
+            const state = data?.['state'] as string | undefined;
+            const final = data?.['final'] as boolean | undefined;
+            if (state) this._logger.info({ subtaskId, taskId: handle.taskId, state, final }, 'subtask status');
+
+            const parsed = extractStatusResult(event);
+            if (parsed) structuredResult = parsed;
+
+            if (!parsed) {
+              const followUp = extractFollowUpResult(event);
+              if (followUp) {
+                structuredResult = followUp;
+                // Cancel the task and let waitForDone signal completion.
+                handle.cancel().catch((err) =>
+                  this._logger.warn(
+                    { subtaskId, taskId: handle.taskId, err: String(err) },
+                    'cancel after follow-up failed',
+                  ),
+                );
+                return;
+              }
+            }
+          } else if (event.type === 'artifact') {
+            fallbackText = extractArtifactText(event);
+          } else if (event.type === 'message') {
+            const text = extractMessageText(event);
+            if (text) {
+              this._logger.info({ subtaskId, taskId: handle.taskId, message: text.slice(0, 200) }, 'subtask message');
+              fallbackText += text;
+            }
+          } else if (event.type === 'error') {
+            const data = event.data as Record<string, unknown> | null | undefined;
+            this._logger.warn({ subtaskId, taskId: handle.taskId, reason: data?.['reason'] }, 'subtask error');
+            finishError(new Error(`Worker error: ${data?.['reason'] ?? 'unknown'}`));
           }
-        } else if (event.type === 'error') {
-          const data = event.data as Record<string, unknown> | null | undefined;
-          this._logger.warn({ subtaskId, taskId: handle.taskId, reason: data?.['reason'] }, 'subtask error');
-          throw new Error(`Worker error: ${data?.['reason'] ?? 'unknown'}`);
+        } catch (err) {
+          finishError(err instanceof Error ? err : new Error(String(err)));
         }
-      }
-    }
+      };
 
-    const result: TaskResult = structuredResult ?? {
-      status: 'completed',
-      stop_reason: 'end_turn',
-      summary: fallbackText || '(no output)',
-      branch_ref: '',
-      session_transcript_ref: '',
-      error: null,
-    };
+      const unsubscribe = handle.onEvent(onEvent);
 
-    if (result.status !== 'completed') {
-      this._logger.error(
-        { subtaskId, taskId: handle.taskId, status: result.status, stopReason: result.stop_reason },
-        'subtask finished with non-completed status',
-      );
-      throw new PlanAbortedError(subtaskId, result);
-    }
+      // When the pump signals done, finalize the result.
+      handle.waitForDone()
+        .then(() => {
+          if (settled) return;
 
-    return result;
+          const result: TaskResult = structuredResult ?? {
+            status: 'completed',
+            stop_reason: 'end_turn',
+            summary: fallbackText || '(no output)',
+            branch_ref: '',
+            session_transcript_ref: '',
+            error: null,
+          };
+
+          if (result.status !== 'completed') {
+            this._logger.error(
+              { subtaskId, taskId: handle.taskId, status: result.status, stopReason: result.stop_reason },
+              'subtask finished with non-completed status',
+            );
+            finishError(new PlanAbortedError(subtaskId, result));
+            return;
+          }
+          finish(result);
+        })
+        .catch((err) => {
+          finishError(err instanceof Error ? err : new Error(String(err)));
+        });
+    });
   }
 }

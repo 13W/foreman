@@ -15,14 +15,23 @@ export interface A2AClient {
   /**
    * Dispatch a task to the agent at url.
    * Returns the taskId assigned by the remote agent.
+   * Immediately starts a background pump that drains the stream and emits events
+   * via subscribe(). No consumer needs to be attached for the pump to run.
    */
   dispatchTask(url: string, payload: TaskPayload): Promise<string>;
 
   /**
-   * Stream updates for taskId via SSE.
-   * Yields StreamEvent values until the task reaches a terminal state.
+   * Subscribe to streaming events for taskId. The listener is called synchronously
+   * for each event emitted by the background pump.
+   * Returns an unsubscribe function. Call it to stop receiving events.
    */
-  streamTask(taskId: string): AsyncIterableIterator<StreamEvent>;
+  subscribe(taskId: string, listener: (event: StreamEvent) => void): () => void;
+
+  /**
+   * Resolves when the background pump for taskId exits cleanly (terminal event seen
+   * or stream ended). Rejects if the pump errors out.
+   */
+  waitForDone(taskId: string): Promise<void>;
 
   /**
    * Fallback polling via tasks/get for agents that do not support SSE.

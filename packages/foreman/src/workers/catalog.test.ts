@@ -11,7 +11,8 @@ const mockFetchAgentCard = vi.fn<(url: string) => Promise<AgentCardMetadata>>();
 const mockClient: A2AClient = {
   fetchAgentCard: mockFetchAgentCard,
   dispatchTask: vi.fn(),
-  streamTask: vi.fn(),
+  subscribe: vi.fn(),
+  waitForDone: vi.fn(),
   pollTask: vi.fn(),
   cancelTask: vi.fn(),
   respondToPermission: vi.fn(),

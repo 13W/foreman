@@ -1,4 +1,4 @@
-import type { A2AClient, StreamEvent, TaskPayload } from '@foreman-stack/shared';
+import type { A2AClient, TaskPayload } from '@foreman-stack/shared';
 import { logger } from '../logger.js';
 import { DispatchHandle } from './task-handle.js';
 
@@ -11,12 +11,6 @@ const DISPATCH_MAX_RETRIES = 3;
 const RETRY_DELAYS_MS = [1_000, 5_000, 15_000] as const;
 // Max random ±jitter per attempt
 const RETRY_JITTER_MS = [200, 1_000, 3_000] as const;
-
-const TERMINAL_STATES = new Set(['completed', 'canceled', 'failed', 'rejected']);
-
-const POLL_INITIAL_INTERVAL_MS = 2_000;
-const POLL_MAX_INTERVAL_MS = 30_000;
-const POLL_MAX_CONSECUTIVE_FAILURES = 10;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -31,13 +25,6 @@ function delayWithJitter(attempt: number): Promise<void> {
   const jitter = RETRY_JITTER_MS[attempt];
   const ms = base + (Math.random() * 2 - 1) * jitter;
   return sleep(ms);
-}
-
-function isTerminalEvent(event: StreamEvent): boolean {
-  if (event.type !== 'status') return false;
-  const data = event.data as { state?: string; final?: boolean };
-  if (data.state === 'input-required') return false;
-  return data.final === true || TERMINAL_STATES.has(data.state ?? '');
 }
 
 // ---------------------------------------------------------------------------
@@ -71,60 +58,6 @@ class Semaphore {
 }
 
 // ---------------------------------------------------------------------------
-// Event stream generator
-// ---------------------------------------------------------------------------
-
-async function* makeEventStream(
-  taskId: string,
-  client: A2AClient,
-  release: () => void,
-): AsyncGenerator<StreamEvent> {
-  try {
-    // Primary: SSE streaming
-    try {
-      for await (const event of client.streamTask(taskId)) {
-        yield event;
-        if (isTerminalEvent(event)) return;
-      }
-    } catch (streamErr) {
-      logger.debug({ taskId, err: String(streamErr) }, 'stream failed, falling back to polling');
-    }
-
-    // Fallback: polling via tasks/get with exponential backoff
-    let intervalMs = POLL_INITIAL_INTERVAL_MS;
-    let consecutiveFailures = 0;
-
-    while (true) {
-      try {
-        const event = await client.pollTask(taskId);
-        consecutiveFailures = 0;
-        yield event;
-        if (isTerminalEvent(event)) return;
-      } catch (pollErr) {
-        consecutiveFailures++;
-        logger.debug(
-          { taskId, consecutiveFailures, err: String(pollErr) },
-          'poll attempt failed',
-        );
-        if (consecutiveFailures >= POLL_MAX_CONSECUTIVE_FAILURES) {
-          yield {
-            type: 'error',
-            taskId,
-            data: { reason: 'connection_lost' },
-            timestamp: new Date().toISOString(),
-          };
-          return;
-        }
-      }
-      await sleep(intervalMs);
-      intervalMs = Math.min(intervalMs * 2, POLL_MAX_INTERVAL_MS);
-    }
-  } finally {
-    release();
-  }
-}
-
-// ---------------------------------------------------------------------------
 // DispatchManager
 // ---------------------------------------------------------------------------
 
@@ -143,11 +76,18 @@ export class DispatchManager {
    *
    * Acquires a global semaphore slot (blocks when at capacity).
    * Retries dispatch up to 3 times with jittered backoff ONLY before a taskId
-   * is received. Once taskId is known the slot is held until the returned
-   * DispatchHandle's event stream reaches a terminal state.
+   * is received. Once taskId is known, the slot is held until the task's pump
+   * exits (auto-released via waitForDone) or the handle's release() is called.
    */
   async dispatch(url: string, payload: TaskPayload): Promise<DispatchHandle> {
     await this._semaphore.acquire();
+
+    let semaphoreReleased = false;
+    const release = () => {
+      if (semaphoreReleased) return;
+      semaphoreReleased = true;
+      this._semaphore.release();
+    };
 
     logger.info({ url, description: payload.description.slice(0, 120) }, 'dispatching task to worker');
 
@@ -159,7 +99,7 @@ export class DispatchManager {
         break;
       } catch (err) {
         if (attempt === DISPATCH_MAX_RETRIES - 1) {
-          this._semaphore.release();
+          release();
           throw err;
         }
         logger.debug(
@@ -172,12 +112,12 @@ export class DispatchManager {
 
     logger.info({ url, taskId }, 'task accepted by worker');
 
-    const finalTaskId = taskId!;
-    const gen = makeEventStream(finalTaskId, this._client, () => this._semaphore.release());
-    const cancelFn = async () => {
-      await this._client.cancelTask(finalTaskId);
-    };
+    // Auto-release semaphore when the pump exits. The handle's .release() is also
+    // a manual escape hatch (e.g. release early after consuming desired events).
+    this._client.waitForDone(taskId!).finally(release).catch(() => {
+      // Suppress: release() already handles errors via finally
+    });
 
-    return new DispatchHandle(finalTaskId, url, gen, cancelFn);
+    return new DispatchHandle(taskId!, url, this._client, release);
   }
 }

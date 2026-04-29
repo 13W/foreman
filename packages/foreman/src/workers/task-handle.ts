@@ -1,43 +1,49 @@
-import type { StreamEvent } from '@foreman-stack/shared';
+import type { A2AClient, StreamEvent } from '@foreman-stack/shared';
 
-export class DispatchHandle implements AsyncIterableIterator<StreamEvent> {
+export class DispatchHandle {
   readonly taskId: string;
   readonly agentUrl: string;
 
-  private readonly _gen: AsyncGenerator<StreamEvent>;
-  private readonly _cancelFn: () => Promise<void>;
+  private readonly _client: A2AClient;
+  private readonly _release: () => void;
+  private _released = false;
 
-  constructor(
-    taskId: string,
-    agentUrl: string,
-    gen: AsyncGenerator<StreamEvent>,
-    cancelFn: () => Promise<void>,
-  ) {
+  constructor(taskId: string, agentUrl: string, client: A2AClient, release: () => void) {
     this.taskId = taskId;
     this.agentUrl = agentUrl;
-    this._gen = gen;
-    this._cancelFn = cancelFn;
+    this._client = client;
+    this._release = release;
   }
 
-  next(): Promise<IteratorResult<StreamEvent>> {
-    return this._gen.next();
+  /**
+   * Subscribe to events for this task. Returns an unsubscribe function.
+   * The listener is called synchronously by the EventEmitter pump for each event.
+   */
+  onEvent(listener: (event: StreamEvent) => void): () => void {
+    return this._client.subscribe(this.taskId, listener);
   }
 
-  return(value?: StreamEvent): Promise<IteratorResult<StreamEvent, unknown>> {
-    return this._gen.return(value);
+  /**
+   * Resolves when the task's pump exits (terminal event or stream end).
+   * Rejects if the pump errors out.
+   */
+  waitForDone(): Promise<void> {
+    return this._client.waitForDone(this.taskId);
   }
 
-  throw(err?: unknown): Promise<IteratorResult<StreamEvent, unknown>> {
-    return this._gen.throw(err);
-  }
-
-  [Symbol.asyncIterator](): this {
-    return this;
-  }
-
-  /** Cancel the remote task and terminate the event stream. */
+  /** Cancel the remote task. The pump will see the terminal event and exit naturally. */
   async cancel(): Promise<void> {
-    await this._cancelFn();
-    await this._gen.return(undefined);
+    await this._client.cancelTask(this.taskId);
+  }
+
+  /**
+   * Release the dispatch concurrency slot. Idempotent.
+   * The slot is also auto-released when the pump exits, but callers may release
+   * earlier (e.g. after all desired events have been processed).
+   */
+  release(): void {
+    if (this._released) return;
+    this._released = true;
+    this._release();
   }
 }

@@ -207,6 +207,10 @@ function isTerminalStatus(event: StreamEvent): boolean {
  *   - Planner plan event status changes are silently ignored.
  *   - Planner content/metadata changes on existing entries are accepted.
  *   - New entries from planner during execution are logged and ignored (MVP).
+ *
+ * A single persistent listener (_onPlannerEvent) is attached to the handle once in
+ * open() and stays for the session lifetime. Each phase (open/ask/resumeWithAnswer)
+ * sets a _phaseConsumer callback that routes events to the current phase's promise.
  */
 export class ExternalPlannerSession implements PlannerSession {
   readonly mode: PlannerSessionMode = 'external_planner';
@@ -219,6 +223,13 @@ export class ExternalPlannerSession implements PlannerSession {
   private _latestEntries: PlanEntry[] | null = null;
   private _phase: 'planning' | 'executing' | 'closed' = 'planning';
   private _originatorIntent = '';
+
+  // Single persistent listener for all phases
+  private _unsubscribe: (() => void) | null = null;
+  // Current phase event consumer (set per _consumeUntilPlanOrPause call)
+  private _phaseConsumer: ((event: StreamEvent) => void) | null = null;
+  // Buffer for events that arrive between phases (when _phaseConsumer is null)
+  private _eventBuffer: StreamEvent[] = [];
 
   get taskId(): string | null { return this._taskId; }
 
@@ -266,6 +277,9 @@ export class ExternalPlannerSession implements PlannerSession {
     this._handle = handle;
     this._taskId = handle.taskId;
 
+    // Attach the persistent listener once. It stays for the session lifetime.
+    this._unsubscribe = handle.onEvent(this._onPlannerEvent);
+
     const { plan } = await this._consumeUntilPlanOrPause();
     this._plan = plan;
     this._logger.debug({ taskId: this._taskId, hasPlan: !!plan }, 'open complete');
@@ -296,6 +310,9 @@ export class ExternalPlannerSession implements PlannerSession {
     if (this._closed) return;
     this._closed = true;
     this._phase = 'closed';
+    this._phaseConsumer = null;
+    this._unsubscribe?.();
+    this._unsubscribe = null;
     if (this._handle) {
       await this._handle.cancel().catch((err: unknown) => {
         this._logger.debug({ err: String(err) }, 'planner cancel error (ignored)');
@@ -332,75 +349,129 @@ export class ExternalPlannerSession implements PlannerSession {
   }
 
   /**
+   * Persistent event listener attached once in open() and kept for the session lifetime.
+   * Always processes plan entries (routing to _handleIncomingEntries for phase-aware filtering).
+   * Delegates all event processing to the current _phaseConsumer if one is active.
+   */
+  private readonly _onPlannerEvent = (event: StreamEvent): void => {
+    // Always process plan entries regardless of phase consumer state
+    if (event.type === 'status') {
+      const rawEntries = extractPlanEntriesFromStatusEvent(event);
+      if (rawEntries !== null) {
+        this._logger.debug(
+          { entryCount: rawEntries.length, phase: this._phase },
+          'received plan entries from status event',
+        );
+        this._handleIncomingEntries(rawEntries as PlanEntry[]);
+      }
+    }
+
+    // Route to current phase consumer, or buffer for next phase
+    if (this._phaseConsumer) {
+      this._phaseConsumer(event);
+    } else {
+      this._eventBuffer.push(event);
+    }
+  };
+
+  /**
    * Consume events from the handle until:
    *  - input-required: planner is waiting for next input
    *  - terminal state: planner finished
-   *  - done: stream ended
+   *  - stream done: pump exited
    *
-   * Detects ACP plan entries from status events and updates _latestEntries.
-   * On exit, converts _latestEntries to Plan if available (primary path);
-   * falls back to JSON-in-text / JSON-in-status-data-part.
-   *
-   * During 'executing' phase, plan events are filtered:
-   *   - Status changes on existing entries: silently ignored (foreman authoritative)
-   *   - Additions: logged and ignored (TODO: surface as suggestion in future)
-   *   - Content/metadata changes on existing entries: accepted
+   * Sets _phaseConsumer for the duration of this phase. The persistent listener
+   * (_onPlannerEvent) delivers events to it. On resolution, _phaseConsumer is
+   * cleared (but the persistent listener stays for execution-phase filtering).
    */
-  private async _consumeUntilPlanOrPause(): Promise<{ plan: Plan | null; text: string }> {
+  private _consumeUntilPlanOrPause(): Promise<{ plan: Plan | null; text: string }> {
     const handle = this._handle!;
-    let text = '';
-    let plan: Plan | null = null;
 
-    const deadline = Date.now() + this._timeoutMs;
+    return new Promise((resolve, reject) => {
+      let text = '';
+      let planFromStatus: Plan | null = null;
+      let settled = false;
 
-    while (true) {
-      const remaining = Math.max(0, deadline - Date.now());
+      const finish = (result: { plan: Plan | null; text: string }) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        this._phaseConsumer = null;
+        resolve(result);
+      };
 
-      const nextPromise = handle.next();
-      const timeoutPromise = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error('planner response timeout')), remaining),
-      );
+      const fail = (err: Error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        this._phaseConsumer = null;
+        this._unsubscribe?.();
+        this._unsubscribe = null;
+        reject(err);
+      };
 
-      const { value: event, done } = await Promise.race([nextPromise, timeoutPromise]);
-      if (done) break;
+      const timer = setTimeout(() => fail(new Error('planner response timeout')), this._timeoutMs);
 
-      if (event.type === 'message') {
-        text += extractMessageText(event);
-      } else if (event.type === 'artifact') {
-        text += extractArtifactText(event);
-      } else if (event.type === 'status') {
-        // Check for plan entries from the proxy mapper (primary ACP plan path)
-        const rawEntries = extractPlanEntriesFromStatusEvent(event);
-        if (rawEntries !== null) {
-          this._logger.debug(
-            { entryCount: rawEntries.length, phase: this._phase },
-            'received plan entries from status event',
-          );
-          this._handleIncomingEntries(rawEntries as PlanEntry[]);
-          // Don't break — keep consuming; plan can be refined multiple times
-        }
+      this._phaseConsumer = (event: StreamEvent) => {
+        if (settled) return;
 
-        const statusText = extractTextFromStatusMessage(event);
-        if (statusText) text += statusText;
+        try {
+          if (event.type === 'message') {
+            text += extractMessageText(event);
+          } else if (event.type === 'artifact') {
+            text += extractArtifactText(event);
+          } else if (event.type === 'status') {
+            const statusText = extractTextFromStatusMessage(event);
+            if (statusText) text += statusText;
 
-        if (isInputRequired(event)) {
-          const fromStatus = tryParsePlanFromStatusEvent(event);
-          if (fromStatus) plan = fromStatus;
-          if (!plan && !tryParsePlanFromText(text)) {
-            this._pendingQuestion = text.trim() || '(planner needs clarification)';
+            const fromStatus = tryParsePlanFromStatusEvent(event);
+            if (fromStatus) planFromStatus = fromStatus;
+
+            if (isInputRequired(event)) {
+              finish(this._buildPhaseResult(planFromStatus, text));
+              return;
+            }
+            if (isTerminalStatus(event)) {
+              finish(this._buildPhaseResult(planFromStatus, text));
+              return;
+            }
+          } else if (event.type === 'error') {
+            const data = event.data as Record<string, unknown> | null | undefined;
+            fail(new Error(`planner error: ${data?.['reason'] ?? 'unknown'}`));
           }
-          break;
+        } catch (err) {
+          fail(err instanceof Error ? err : new Error(String(err)));
         }
-        if (isTerminalStatus(event)) {
-          const fromStatus = tryParsePlanFromStatusEvent(event);
-          if (fromStatus) plan = fromStatus;
-          break;
-        }
-      } else if (event.type === 'error') {
-        const data = event.data as Record<string, unknown> | null | undefined;
-        throw new Error(`planner error: ${data?.['reason'] ?? 'unknown'}`);
+      };
+
+      // Drain any events that arrived between phases (when _phaseConsumer was null)
+      const pending = this._eventBuffer.splice(0);
+      for (const e of pending) {
+        if (settled) break;
+        this._phaseConsumer(e);
       }
-    }
+
+      // Handle stream ending (pump exited without terminal event)
+      handle.waitForDone()
+        .then(() => {
+          if (!settled) {
+            finish(this._buildPhaseResult(planFromStatus, text));
+          }
+        })
+        .catch((err) => fail(err instanceof Error ? err : new Error(String(err))));
+    });
+  }
+
+  /**
+   * Build the final result for a phase: resolve plan from entries (primary),
+   * status event (secondary), or accumulated text (fallback).
+   * Sets _pendingQuestion if no plan was found.
+   */
+  private _buildPhaseResult(
+    planFromStatus: Plan | null,
+    text: string,
+  ): { plan: Plan | null; text: string } {
+    let plan = planFromStatus;
 
     // Primary path: convert _latestEntries to Plan if available
     if (this._latestEntries !== null && this._latestEntries.length > 0) {
@@ -424,6 +495,10 @@ export class ExternalPlannerSession implements PlannerSession {
         this._pendingQuestion = null;
         this._logger.info('plan built from text JSON (fallback path)');
       }
+    }
+
+    if (!plan) {
+      this._pendingQuestion = text.trim() || '(planner needs clarification)';
     }
 
     return { plan, text };
@@ -459,7 +534,6 @@ export class ExternalPlannerSession implements PlannerSession {
       if (!id || !existingById.has(id)) {
         this._logger.info(
           { subtaskId: id },
-          // TODO: surface new entries as suggestions in future
           'planner added new entry during execution; ignoring (foreman authoritative)',
         );
         hasNewEntries = true;

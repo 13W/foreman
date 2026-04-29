@@ -686,62 +686,105 @@ export class Foreman {
     sessionState.activeDispatchHandles.set(handle.taskId, handle);
 
     try {
-      let structuredResult: TaskResultType | null = null;
-      let fallbackText = '';
+      return await new Promise<TaskResultType>((resolve, reject) => {
+        let structuredResult: TaskResultType | null = null;
+        let fallbackText = '';
+        let settled = false;
 
-      for await (const event of handle) {
+        const finish = (result: TaskResultType) => {
+          if (settled) return;
+          settled = true;
+          unsubscribe();
+          handle.release();
+          resolve(result);
+        };
+
+        const fail = (err: Error) => {
+          if (settled) return;
+          settled = true;
+          unsubscribe();
+          handle.release();
+          reject(err);
+        };
+
+        // Handle abort signal
         if (signal?.aborted) {
+          handle.cancel().catch(() => {});
+          reject(new Error('Cancelled'));
+          return;
+        }
+        const onAbort = () => {
           this.logger.warn({ taskId: handle.taskId, agentUrl: url }, 'worker task cancelled via abort signal');
-          await handle.cancel().catch(() => {});
-          throw new Error('Cancelled');
-        }
+          handle.cancel().catch(() => {});
+          fail(new Error('Cancelled'));
+        };
+        signal?.addEventListener('abort', onAbort, { once: true });
 
-        if (isPermissionEvent(event)) {
-          const req = extractPermissionRequest(event);
-          if (req) {
-            await this._handleWorkerEscalation(handle.taskId, req, sessionId);
-          }
-        } else if (event.type === 'status') {
-          const data = event.data as Record<string, unknown> | null | undefined;
-          const state = data?.['state'] as string | undefined;
-          const final = data?.['final'] as boolean | undefined;
-          if (state) this.logger.info({ taskId: handle.taskId, agentUrl: url, state, final }, 'worker status');
-          const parsed = extractStatusResult(event);
-          if (parsed) structuredResult = parsed;
-          if (!parsed) {
-            const followUp = extractFollowUpResult(event);
-            if (followUp) {
-              structuredResult = followUp;
-              await handle.cancel();
-              break;
+        const unsubscribe = handle.onEvent((event) => {
+          if (settled) return;
+
+          if (isPermissionEvent(event)) {
+            const req = extractPermissionRequest(event);
+            if (req) {
+              this._handleWorkerEscalation(handle.taskId, req, sessionId).catch((err) => {
+                fail(err instanceof Error ? err : new Error(String(err)));
+              });
             }
+            return;
           }
-        } else if (event.type === 'artifact') {
-          fallbackText = extractArtifactText(event);
-          this.logger.debug({ taskId: handle.taskId, agentUrl: url, len: fallbackText.length }, 'worker artifact');
-        } else if (event.type === 'message') {
-          const text = extractMessageText(event);
-          if (text) {
-            this.logger.info({ taskId: handle.taskId, agentUrl: url, message: text.slice(0, 200) }, 'worker message');
-            fallbackText += text;
+
+          if (event.type === 'status') {
+            const data = event.data as Record<string, unknown> | null | undefined;
+            const state = data?.['state'] as string | undefined;
+            const final = data?.['final'] as boolean | undefined;
+            if (state) this.logger.info({ taskId: handle.taskId, agentUrl: url, state, final }, 'worker status');
+            const parsed = extractStatusResult(event);
+            if (parsed) structuredResult = parsed;
+            if (!parsed) {
+              const followUp = extractFollowUpResult(event);
+              if (followUp) {
+                structuredResult = followUp;
+                handle.cancel().catch(() => {});
+                return;
+              }
+            }
+          } else if (event.type === 'artifact') {
+            fallbackText = extractArtifactText(event);
+            this.logger.debug({ taskId: handle.taskId, agentUrl: url, len: fallbackText.length }, 'worker artifact');
+          } else if (event.type === 'message') {
+            const text = extractMessageText(event);
+            if (text) {
+              this.logger.info({ taskId: handle.taskId, agentUrl: url, message: text.slice(0, 200) }, 'worker message');
+              fallbackText += text;
+            }
+          } else if (event.type === 'error') {
+            const data = event.data as Record<string, unknown> | null | undefined;
+            this.logger.warn({ taskId: handle.taskId, agentUrl: url, reason: data?.['reason'] }, 'worker error');
+            fail(new Error(`Worker error: ${data?.['reason'] ?? 'unknown'}`));
           }
-        } else if (event.type === 'error') {
-          const data = event.data as Record<string, unknown> | null | undefined;
-          this.logger.warn({ taskId: handle.taskId, agentUrl: url, reason: data?.['reason'] }, 'worker error');
-          throw new Error(`Worker error: ${data?.['reason'] ?? 'unknown'}`);
-        }
-      }
+        });
 
-      if (structuredResult) return structuredResult;
-
-      return {
-        status: 'completed',
-        stop_reason: 'end_turn',
-        summary: fallbackText || '(no output)',
-        branch_ref: '',
-        session_transcript_ref: '',
-        error: null,
-      };
+        handle.waitForDone()
+          .then(() => {
+            signal?.removeEventListener('abort', onAbort);
+            if (!settled) {
+              finish(
+                structuredResult ?? {
+                  status: 'completed',
+                  stop_reason: 'end_turn',
+                  summary: fallbackText || '(no output)',
+                  branch_ref: '',
+                  session_transcript_ref: '',
+                  error: null,
+                },
+              );
+            }
+          })
+          .catch((err) => {
+            signal?.removeEventListener('abort', onAbort);
+            fail(err instanceof Error ? err : new Error(String(err)));
+          });
+      });
     } finally {
       sessionState.activeDispatchHandles.delete(handle.taskId);
     }
