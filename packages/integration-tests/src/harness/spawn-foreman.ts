@@ -1,10 +1,13 @@
-import { spawn } from 'node:child_process';
+import { spawn, execFile } from 'node:child_process';
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { promisify } from 'node:util';
 import { registerProcess } from './cleanup.js';
 import YAML from 'yaml';
 import type { MockAnthropicServer } from './mock-anthropic-server.js';
+
+const execFileAsync = promisify(execFile);
 
 export interface SpawnForemanOpts {
   workers: { url: string; name_hint?: string }[];
@@ -14,6 +17,13 @@ export interface SpawnForemanOpts {
 export async function spawnForeman(opts: SpawnForemanOpts) {
   const tempDir = join(tmpdir(), `foreman-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   mkdirSync(tempDir, { recursive: true });
+
+  // Initialize a git repo so workers can create worktrees in this directory
+  await execFileAsync('git', ['init'], { cwd: tempDir });
+  await execFileAsync('git', ['config', 'user.email', 'test@example.com'], { cwd: tempDir });
+  await execFileAsync('git', ['config', 'user.name', 'test'], { cwd: tempDir });
+  await execFileAsync('git', ['commit', '--allow-empty', '-m', 'initial commit'], { cwd: tempDir });
+  await execFileAsync('git', ['branch', '-M', 'main'], { cwd: tempDir });
 
   const configPath = join(tempDir, 'foreman.yaml');
   const config = {

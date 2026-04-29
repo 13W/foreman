@@ -109,10 +109,12 @@ describe('User Cancellation Scenario', () => {
     // 6. Send prompt asynchronously
     const promptPromise = client.prompt(sessionId, 'Be slow');
 
-    // 7. Wait for planning to finish and coder to be dispatched
+    // 7. Wait for planning to finish and coder to be dispatched.
+    // The external planner path dispatches programmatically without calling Anthropic,
+    // so we detect execution start via the tool_call session update sent when a subtask starts.
     let planningFinished = false;
     for (let i = 0; i < 50; i++) {
-      if (mockAnthropic.getRequestLog().length >= 2) {
+      if (client.updates.some((u) => u.sessionUpdate === 'tool_call')) {
         planningFinished = true;
         break;
       }

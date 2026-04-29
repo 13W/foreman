@@ -48,6 +48,9 @@ export class DefaultA2AClient extends EventEmitter implements A2AClient {
   private readonly _taskRegistry = new Map<string, TaskEntry>();
   private readonly _activeStreams = new Map<string, AbortController>();
   private readonly _taskErrors = new Map<string, Error>();
+  // Per-task event replay buffer: events emitted before subscribe() is called are buffered
+  // so that late subscribers (e.g. after an await) still receive all events.
+  private readonly _taskEventBuffers = new Map<string, StreamEvent[]>();
   private readonly _msgLogger?: MsgLogger;
 
   constructor(options: DefaultA2AClientOptions = {}) {
@@ -118,6 +121,13 @@ export class DefaultA2AClient extends EventEmitter implements A2AClient {
   }
 
   subscribe(taskId: string, listener: (event: StreamEvent) => void): () => void {
+    // Replay events that arrived before this subscriber registered (handles timing race
+    // where the pump runs to completion before the caller has a chance to subscribe).
+    const buf = this._taskEventBuffers.get(taskId);
+    if (buf && buf.length > 0) {
+      for (const e of buf) listener(e);
+      this._taskEventBuffers.delete(taskId);
+    }
     const eventName = `task:${taskId}`;
     this.on(eventName, listener);
     return () => this.off(eventName, listener);
@@ -185,6 +195,20 @@ export class DefaultA2AClient extends EventEmitter implements A2AClient {
     });
   }
 
+  private _bufferAndEmit(taskId: string, event: StreamEvent): void {
+    // Only buffer when there are no active listeners — once a subscriber registers,
+    // events go directly to it and buffering is unnecessary.
+    if (this.listenerCount(`task:${taskId}`) === 0) {
+      let buf = this._taskEventBuffers.get(taskId);
+      if (buf === undefined) {
+        buf = [];
+        this._taskEventBuffers.set(taskId, buf);
+      }
+      buf.push(event);
+    }
+    this.emit(`task:${taskId}`, event);
+  }
+
   private async _pumpStream(
     taskId: string,
     stream: AsyncGenerator<SdkStreamEvent>,
@@ -201,7 +225,7 @@ export class DefaultA2AClient extends EventEmitter implements A2AClient {
           if (signal.aborted) break;
           const mapped = mapSdkEvent(taskId, event as SdkStreamEvent);
           this._msgLogger?.log('in', 'a2a', mapped.type, mapped, { taskId });
-          this.emit(`task:${taskId}`, mapped);
+          this._bufferAndEmit(taskId, mapped);
           if (isTerminal(event as SdkStreamEvent)) {
             this.emit(`task:${taskId}:done`);
             return;
@@ -236,7 +260,7 @@ export class DefaultA2AClient extends EventEmitter implements A2AClient {
             timestamp: task.status.timestamp,
           };
           this._msgLogger?.log('in', 'a2a', 'poll', event, { taskId });
-          this.emit(`task:${taskId}`, event);
+          this._bufferAndEmit(taskId, event);
           if (TERMINAL_STATES.has(task.status.state)) {
             this.emit(`task:${taskId}:done`);
             return;
@@ -251,7 +275,7 @@ export class DefaultA2AClient extends EventEmitter implements A2AClient {
               data: { reason: 'connection_lost' },
               timestamp: new Date().toISOString(),
             };
-            this.emit(`task:${taskId}`, errorEvent);
+            this._bufferAndEmit(taskId, errorEvent);
             this.emit(`task:${taskId}:done`);
             return;
           }
@@ -277,6 +301,8 @@ export class DefaultA2AClient extends EventEmitter implements A2AClient {
       this.removeAllListeners(`task:${taskId}`);
       this.removeAllListeners(`task:${taskId}:done`);
       this.removeAllListeners(`task:${taskId}:error`);
+      // Keep _taskEventBuffers entry alive so late subscribe() calls can still replay events.
+      // It will be cleared by subscribe() on first call, or remain small/harmless if never called.
     }
   }
 

@@ -102,9 +102,9 @@ describe('Failure Propagation Scenario', () => {
       expect(lastUpdate.content.text).toMatch(/failed|refusal/i);
     }
 
-    // Verify mock server saw planning call + synthesis call
+    // Verify mock server saw at least 1 call (synthesis; external planner path skips LLM for planning)
     const requests = mockAnthropic.getRequestLog();
-    expect(requests.length).toBeGreaterThanOrEqual(2);
+    expect(requests.length).toBeGreaterThanOrEqual(1);
     
     // The second call (synthesis) should contain the failure message
     const synthesisRequest = requests[requests.length - 1];

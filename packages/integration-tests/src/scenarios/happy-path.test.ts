@@ -102,7 +102,7 @@ describe('Happy Path Scenario', () => {
       expect(lastUpdate.content.text).toBe('Successfully refactored the auth module and added tests.');
     }
 
-    // Verify mock server saw at least 2 calls (Planning and synthesis)
-    expect(mockAnthropic.getRequestLog().length).toBeGreaterThanOrEqual(2);
+    // Verify mock server saw at least 1 call (synthesis; external planner path skips LLM for planning)
+    expect(mockAnthropic.getRequestLog().length).toBeGreaterThanOrEqual(1);
   }, 60000); // 60s timeout for full scenario
 });
