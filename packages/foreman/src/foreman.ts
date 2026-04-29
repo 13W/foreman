@@ -1,3 +1,5 @@
+import { exec } from 'node:child_process';
+import { promisify } from 'node:util';
 import type { ContentBlock, PlanEntry } from '@agentclientprotocol/sdk';
 import type { ForemanConfig } from './config.js';
 import { createLogger } from './logger.js';
@@ -28,6 +30,7 @@ import type {
   TaskResult as TaskResultType,
 } from '@foreman-stack/shared';
 import { mapPermissionOptionToDecision } from './permissions/mapper.js';
+import { buildMergeTask } from './plan/build-merge-task.js';
 import { PlanAbortedError, PlanExecutor, PlannerFallbackHandler } from './plan/index.js';
 import type { PlannerSession, PlannerSessionOptions, ExecutionStateSnapshot } from './plan/index.js';
 import { SessionManager } from './session/manager.js';
@@ -685,6 +688,28 @@ export class Foreman {
         { sessionId },
         '_executePlan: final sendPlan dispatched (Promise pending)',
       );
+
+      // Auto-merge phase: delegate merging completed branches to a worker.
+      const branchesToMerge = subtaskResults
+        .filter((r) => r.result.status === 'completed' && r.result.branch_ref)
+        .map((r) => ({
+          subtaskId: r.subtaskId,
+          branchRef: r.result.branch_ref,
+          description: subtaskDescriptions.get(r.subtaskId) ?? r.subtaskId,
+        }));
+
+      if (branchesToMerge.length > 0) {
+        const baseBranch = sessionState.cwd
+          ? await this._detectBaseBranch(sessionState.cwd).catch(() => 'main')
+          : 'main';
+        await this._runMergePhase(
+          sessionId,
+          sessionState,
+          branchesToMerge,
+          baseBranch,
+          userText,
+        );
+      }
     } catch (err) {
       this.logger.debug(
         {
@@ -893,6 +918,113 @@ export class Foreman {
     } finally {
       sessionState.activeDispatchHandles.delete(handle.taskId);
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Merge phase — delegates git merge of completed branches to a claude worker
+  // ---------------------------------------------------------------------------
+
+  private async _runMergePhase(
+    sessionId: string,
+    sessionState: SessionState,
+    branchesToMerge: Array<{ subtaskId: string; branchRef: string; description: string }>,
+    baseBranch: string,
+    userText: string,
+  ): Promise<void> {
+    const available = this.catalog.getAvailable();
+    const mergeWorker = available.find(
+      (w) =>
+        !this.catalog.isPlanner(w) &&
+        (w.agent_card?.name ?? '').toLowerCase().includes('claude'),
+    );
+
+    if (!mergeWorker) {
+      this.logger.warn(
+        { sessionId, branches: branchesToMerge.map((b) => b.branchRef) },
+        'no claude worker available for merge phase; skipping auto-merge',
+      );
+      await this.acpServer.sendUpdate(sessionId, [
+        {
+          type: 'text',
+          text: `Note: ${branchesToMerge.length} branch${branchesToMerge.length === 1 ? '' : 'es'} were created but auto-merge was skipped (no merge-capable worker available). Branches: ${branchesToMerge.map((b) => `\`${b.branchRef}\``).join(', ')}.`,
+        },
+      ]);
+      return;
+    }
+
+    this.logger.info(
+      { sessionId, workerUrl: mergeWorker.url, branchCount: branchesToMerge.length, baseBranch },
+      'merge phase: dispatching merge task',
+    );
+
+    await this.acpServer.sendUpdate(sessionId, [
+      {
+        type: 'text',
+        text: `Merging ${branchesToMerge.length} branch${branchesToMerge.length === 1 ? '' : 'es'} into \`${baseBranch}\`...`,
+      },
+    ]);
+
+    const mergePayload = buildMergeTask({
+      baseBranch,
+      branchesToMerge,
+      cwd: sessionState.cwd ?? process.cwd(),
+      originatorIntent: userText,
+    });
+
+    let mergeResult: TaskResultType;
+    try {
+      mergeResult = await this._runWorkerTask(
+        mergeWorker.url,
+        mergePayload,
+        sessionId,
+        sessionState,
+        sessionState.abortController?.signal,
+      );
+    } catch (err) {
+      this.logger.error({ sessionId, err: String(err) }, 'merge phase dispatch failed');
+      await this.acpServer.sendUpdate(sessionId, [
+        {
+          type: 'text',
+          text: `Auto-merge failed to dispatch: ${err instanceof Error ? err.message : String(err)}. Branches preserved: ${branchesToMerge.map((b) => `\`${b.branchRef}\``).join(', ')}.`,
+        },
+      ]);
+      return;
+    }
+
+    if (mergeResult.status === 'completed') {
+      await this.acpServer.sendUpdate(sessionId, [
+        { type: 'text', text: `Auto-merge completed:\n\n${mergeResult.summary}` },
+      ]);
+    } else {
+      await this.acpServer.sendUpdate(sessionId, [
+        {
+          type: 'text',
+          text: `Auto-merge stopped:\n\n${mergeResult.summary}\n\nBranches preserved for manual review: ${branchesToMerge.map((b) => `\`${b.branchRef}\``).join(', ')}.`,
+        },
+      ]);
+    }
+  }
+
+  private async _detectBaseBranch(cwd: string): Promise<string> {
+    const execAsync = promisify(exec);
+    try {
+      const { stdout } = await execAsync('git symbolic-ref refs/remotes/origin/HEAD', { cwd });
+      const match = stdout.trim().match(/refs\/remotes\/origin\/(.+)$/);
+      if (match) {
+        this.logger.info({ cwd, baseBranch: match[1] }, 'detected base branch from origin/HEAD');
+        return match[1];
+      }
+    } catch {}
+    try {
+      const { stdout } = await execAsync('git rev-parse --abbrev-ref HEAD', { cwd });
+      const head = stdout.trim();
+      if (head && head !== 'HEAD') {
+        this.logger.info({ cwd, baseBranch: head }, 'detected base branch from HEAD');
+        return head;
+      }
+    } catch {}
+    this.logger.info({ cwd, baseBranch: 'main' }, 'falling back to main for base branch');
+    return 'main';
   }
 
   // ---------------------------------------------------------------------------
