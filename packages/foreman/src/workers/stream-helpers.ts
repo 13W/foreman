@@ -123,3 +123,25 @@ export function extractMessageText(event: StreamEvent): string {
   }
   return chunks.join('');
 }
+
+/**
+ * Parses a worker tool-call activity title from a StreamEvent's status data.
+ *
+ * Returns the human-readable title if the status is a working event with a
+ * useful title. Returns null for bare toolCallIds (toolu_xxx) or non-tool status.
+ */
+export function extractToolActivityTitle(event: StreamEvent): string | null {
+  if (event.type !== 'status') return null;
+  const data = event.data as Record<string, unknown> | null | undefined;
+  if (!data) return null;
+  if (data['state'] !== 'working') return null;
+
+  const message = data['message'];
+  if (typeof message !== 'string') return null;
+  if (!message.trim()) return null;
+
+  // Filter out bare toolCallId strings emitted as update markers
+  if (/^toolu_[A-Za-z0-9_-]+$/.test(message)) return null;
+
+  return message;
+}
