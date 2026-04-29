@@ -14,6 +14,7 @@ import {
   extractFollowUpResult,
   extractArtifactText,
   extractMessageText,
+  extractToolActivityTitle,
 } from './workers/stream-helpers.js';
 import { AnthropicLLMClient } from './llm/anthropic-client.js';
 import { LLMLoop } from './llm/loop.js';
@@ -492,7 +493,16 @@ export class Foreman {
       .catch((err: unknown) => this.logger.warn({ err: String(err) }, 'sendPlan failed'));
 
     const subtaskTextBuffers = new Map<string, string>();
+    const subtaskActivityLog = new Map<string, string[]>();
+    const MAX_ACTIVITY_LINES = 50;
     const subtaskStarted = new Set<string>();
+
+    function composeSubtaskContent(activity: string[], text: string): string {
+      const activityBlock = activity.join('\n');
+      if (!activityBlock) return text;
+      if (!text) return activityBlock;
+      return activityBlock + '\n\n' + text;
+    }
 
     // Initialize per-session execution state for plan-state injection in ask()
     const executionState: ExecutionStateSnapshot = {
@@ -555,13 +565,42 @@ export class Foreman {
           if (text) {
             const buf = (subtaskTextBuffers.get(subtaskId) ?? '') + text;
             subtaskTextBuffers.set(subtaskId, buf);
+            const combined = composeSubtaskContent(subtaskActivityLog.get(subtaskId) ?? [], buf);
             this.acpServer
               .sendToolCallUpdate(sessionId, {
                 toolCallId: subtaskId,
-                content: [{ type: 'content', content: { type: 'text', text: buf } }],
+                content: [{ type: 'content', content: { type: 'text', text: combined } }],
               })
               .catch((err: unknown) =>
                 this.logger.warn({ err: String(err) }, 'sendToolCallUpdate failed'),
+              );
+          }
+        }
+
+        // Status events with tool-call titles → accumulate activity log
+        if (event.type === 'status') {
+          const toolTitle = extractToolActivityTitle(event);
+          if (toolTitle) {
+            const lines = subtaskActivityLog.get(subtaskId) ?? [];
+            const last = lines[lines.length - 1];
+            if (last !== undefined && toolTitle.startsWith(last + ' ')) {
+              lines[lines.length - 1] = toolTitle;
+            } else if (last !== toolTitle) {
+              lines.push(toolTitle);
+            }
+            if (lines.length > MAX_ACTIVITY_LINES) {
+              lines.splice(0, lines.length - MAX_ACTIVITY_LINES);
+            }
+            subtaskActivityLog.set(subtaskId, lines);
+
+            const combined = composeSubtaskContent(lines, subtaskTextBuffers.get(subtaskId) ?? '');
+            this.acpServer
+              .sendToolCallUpdate(sessionId, {
+                toolCallId: subtaskId,
+                content: [{ type: 'content', content: { type: 'text', text: combined } }],
+              })
+              .catch((err: unknown) =>
+                this.logger.warn({ err: String(err) }, 'sendToolCallUpdate activity failed'),
               );
           }
         }
@@ -608,8 +647,18 @@ export class Foreman {
         executionState.inProgress.delete(subtaskId);
         executionState.completed.set(subtaskId, { resultSummary: result.summary.slice(0, 100) });
 
+        const finalContent = composeSubtaskContent(
+          subtaskActivityLog.get(subtaskId) ?? [],
+          subtaskTextBuffers.get(subtaskId) ?? '',
+        );
         this.acpServer
-          .sendToolCallUpdate(sessionId, { toolCallId: subtaskId, status: 'completed' })
+          .sendToolCallUpdate(sessionId, {
+            toolCallId: subtaskId,
+            status: 'completed',
+            ...(finalContent
+              ? { content: [{ type: 'content', content: { type: 'text', text: finalContent } }] }
+              : {}),
+          })
           .catch((err: unknown) =>
             this.logger.warn({ err: String(err) }, 'sendToolCallUpdate completed failed'),
           );
